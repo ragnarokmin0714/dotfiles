@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# @file .bash_aliases
+# @file .bash_env
 # @brief Bash prompt builder with full ANSI style support.
 # @description
 #   Provides a structured way to build PS1 prompts using named ANSI styles.

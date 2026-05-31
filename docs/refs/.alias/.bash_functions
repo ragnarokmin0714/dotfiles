@@ -50,11 +50,111 @@ alias ntp-status='timedatectl status && timedatectl timesync-status'
 # Fix NTP sync and verify result
 alias ntp-fix='sudo timedatectl set-ntp true && sudo systemctl restart systemd-timesyncd && sleep 3 && timedatectl status'
 
-## @name get_ip
-## @description Get primary IPv4 address for prompt display.
-##              Uses 'hostname -I' and awk to extract first IP.
-##              Silent if no IP is found.
-## @example get_ip
+# --- Timezone ---
+
+# @name tz
+# @description Interactive timezone manager.
+#              No args  → show current timezone + menu of common zones.
+#              With arg → set timezone directly (exact) or list fuzzy matches.
+# @param $1 string  Optional: exact timezone or partial keyword (e.g. "Asia/Taipei", "Asia")
+# @example tz
+# @example tz Asia/Taipei
+# @example tz Asia
+tz() {
+    local COMMON_TZ=(
+        "Asia/Taipei"
+        "Asia/Tokyo"
+        "Asia/Shanghai"
+        "Asia/Singapore"
+        "Asia/Seoul"
+        "UTC"
+        "Europe/London"
+        "Europe/Paris"
+        "America/New_York"
+        "America/Los_Angeles"
+    )
+
+    _tz_apply() {
+        sudo timedatectl set-timezone "$1"
+        echo "[OK] Timezone set to: $1"
+        timedatectl | grep -E "Local time|Time zone"
+    }
+
+    # ── With argument: exact or fuzzy ──────────────────────────────────────
+    if [[ -n "$1" ]]; then
+        if timedatectl list-timezones 2>/dev/null | grep -qx "$1"; then
+            _tz_apply "$1"
+            return 0
+        fi
+
+        local matches
+        matches=$(timedatectl list-timezones 2>/dev/null | grep -i "$1")
+
+        if [[ -z "$matches" ]]; then
+            echo "[X] No timezone found for: $1"
+            return 1
+        fi
+
+        echo "Matching timezones:"
+        local -a match_arr
+        mapfile -t match_arr <<< "$matches"
+        local i
+        for i in "${!match_arr[@]}"; do
+            printf "  %2d) %s\n" "$((i+1))" "${match_arr[$i]}"
+        done
+        echo ""
+        printf "Enter number (or press Enter to cancel): "
+        read -r sel
+        [[ -z "$sel" ]] && echo "Cancelled." && return 0
+        if [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#match_arr[@]} )); then
+            _tz_apply "${match_arr[$((sel-1))]}"
+        else
+            echo "[X] Invalid selection."
+            return 1
+        fi
+        return 0
+    fi
+
+    # ── No argument: show current + common zones menu ──────────────────────
+    echo "Current timezone:"
+    timedatectl | grep -E "Local time|Time zone"
+    echo ""
+    echo "Common timezones:"
+    local i
+    for i in "${!COMMON_TZ[@]}"; do
+        printf "  %2d) %s\n" "$((i+1))" "${COMMON_TZ[$i]}"
+    done
+    printf "  %2d) Enter manually\n" "$((${#COMMON_TZ[@]}+1))"
+    echo ""
+    printf "Enter number (or press Enter to cancel): "
+    read -r sel
+
+    [[ -z "$sel" ]] && echo "Cancelled." && return 0
+
+    local manual_opt=$(( ${#COMMON_TZ[@]} + 1 ))
+    if [[ "$sel" == "$manual_opt" ]]; then
+        printf "Timezone (e.g. Asia/Taipei): "
+        read -r manual
+        [[ -z "$manual" ]] && echo "Cancelled." && return 0
+        if timedatectl list-timezones 2>/dev/null | grep -qx "$manual"; then
+            _tz_apply "$manual"
+        else
+            echo "[X] Invalid timezone: $manual"
+            return 1
+        fi
+    elif [[ "$sel" =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#COMMON_TZ[@]} )); then
+        _tz_apply "${COMMON_TZ[$((sel-1))]}"
+    else
+        echo "[X] Invalid selection."
+        return 1
+    fi
+}
+
+# @name get_ip
+# @description Get primary IPv4 address for prompt display.
+#              Uses 'hostname -I' and awk to extract first IP.
+#              Silent if no IP is found.
+# @example get_ip
 get_ip() {
     hostname -I 2>/dev/null | awk '{print $1}'
 }
