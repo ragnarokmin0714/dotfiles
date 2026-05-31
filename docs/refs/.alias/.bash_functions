@@ -1,23 +1,15 @@
-#!/usr/bin/env bash
-# @file .bash_functions
-# @brief General system utility functions and aliases.
-# @description
-#   Provides helper functions for: IP address lookup, file search,
-#   disk usage reporting, disk cleanup, and project runner shortcuts.
-#   All functions depend on the STYLE associative array from .bash_env.
-
-# =============================================================================
+############################################################
+# =========================
 # --- System Utilities ---
-# =============================================================================
+# =========================
 
-# List globally installed npm packages at depth 0 in JSON format
+# List globally installed npm packages (depth 0) in JSON format
 alias npmlsg='npm list -g --depth=0 --json'
 
 # Show network connections and listening ports
 alias netstats='netstat -tulpn'
 alias sss='ss -tulpn'
 
-# --- ls Variants ---
 # long format, include hidden files, human-readable size
 alias lh='ls -lah'
 # long format, hidden, sort by access time
@@ -33,7 +25,6 @@ alias lhtr='lh -tr'
 # long format, hidden, sort by modified time newest first
 alias lht='lh -t'
 
-# --- Service Management ---
 # List all running services
 alias svc-running='systemctl list-units --type=service --state=running'
 # List all failed services
@@ -45,7 +36,6 @@ alias svc-count='systemctl list-units --type=service --all | grep -c .service'
 # Show service status (usage: svc-status nginx)
 alias svc-status='systemctl status'
 
-# --- Datetime ---
 # current datetime in YYYY-MM-DD HH:MM:SS format
 alias now='date +"%Y-%m-%d %H:%M:%S"'
 # current date in YYYY-MM-DD format
@@ -53,7 +43,6 @@ alias today='date +"%Y-%m-%d"'
 # current time in HH:MM:SS format
 alias time-now='date +"%H:%M:%S"'
 
-# --- NTP / Time Sync ---
 # Enable NTP and restart time sync service
 alias ntp-sync='sudo chronyc makestep && sudo hwclock --systohc && chronyc tracking && timedatectl'
 # Show current time sync status
@@ -61,42 +50,41 @@ alias ntp-status='timedatectl status && timedatectl timesync-status'
 # Fix NTP sync and verify result
 alias ntp-fix='sudo timedatectl set-ntp true && sudo systemctl restart systemd-timesyncd && sleep 3 && timedatectl status'
 
-# @name get_ip
-# @description Get primary IPv4 address for prompt display.
-#              Uses 'hostname -I' and awk to extract the first IP.
-#              Silent if no IP is found.
-# @example get_ip
+## @name get_ip
+## @description Get primary IPv4 address for prompt display.
+##              Uses 'hostname -I' and awk to extract first IP.
+##              Silent if no IP is found.
+## @example get_ip
 get_ip() {
     hostname -I 2>/dev/null | awk '{print $1}'
 }
 alias get-ip='get_ip'
 
 # @name find_path
-# @description Find files or directories by name under a given path.
-#              Automatically splits a full path argument into pattern + directory.
-#              Mimics the `fd` tool using standard `find`.
-# @param $1 string  Pattern or full path (e.g. "*.log" or "~/.config/settings.json")
-# @param $2 string  Optional: path to search in (default: current directory)
-# @param $3 string  Optional: file type — f (file), d (directory), l (symlink)
-# @param $4 int     Optional: max search depth
+# @description Find files or directories by name under a given path (mimics `fd` tool).
+#              Automatically splits a full path into pattern and search directory.
+# @param $1 string Pattern or full path (e.g. "*.log" or "~/.claude/.claude.json")
+# @param $2 string Optional path to search in, default is current directory
+# @param $3 string Optional file type: f (file), d (directory), l (symlink)
+# @param $4 int    Optional max depth to search
 # @example find_path "myfile.txt"
 # @example find_path "*.log" /var/log
 # @example find_path "*.conf" /etc f
 # @example find_path "logs" . d
 # @example find_path "*.txt" . f 2
-# @example find_path ~/.config/settings.json
+# @example find_path ~/.claude/.claude.json
 find_path() {
     local pattern="$1"
     local path="${2:-.}"
     local type="$3"
     local depth="$4"
 
-    # Warn if pattern looks like it was glob-expanded by the shell
+    # ── Warn if pattern looks like it was glob-expanded ───────────────────────
     if [[ $# -gt 1 && "$2" != /* && "$2" != "." && "$2" != ".." && ! "$2" =~ ^[fdle]$ ]]; then
         echo -e "${STYLE[fg_yellow]}[!] Tip: use quotes to prevent glob expansion: fp \"${pattern}-*\"${STYLE[reset]}"
     fi
 
-    # Auto-split full path into pattern + search directory
+    # ── Auto-split full path into pattern + directory ─────────────────────────
     if [[ "$pattern" == */* ]]; then
         path=$(dirname "$pattern")
         pattern=$(basename "$pattern")
@@ -118,15 +106,15 @@ find_path() {
 }
 alias fp='find_path'
 
-# =============================================================================
+# =========================
 # --- Disk Utilities ---
-# =============================================================================
+# =========================
 
 # @name disk_usage_top
 # @description Display disk usage for a given path (default: $HOME),
-#              showing the top N largest entries (default: 20).
-# @param $1 string  Optional: path to check (default: $HOME)
-# @param $2 int     Optional: number of entries to show (default: 20)
+#              showing top N largest entries (default: 20).
+# @param $1 string Optional path to check, default is $HOME
+# @param $2 int Optional number of entries to show, default is 20
 # @example disk_usage_top
 # @example disk_usage_top /var
 # @example disk_usage_top /var 10
@@ -140,53 +128,38 @@ alias dut='disk_usage_top'
 
 # @name clean_up_disk
 # @description Perform comprehensive disk cleanup:
-#              - Clean npm and pnpm caches
-#              - Clean package manager cache (apt or dnf — auto-detected)
+#              - Clean npm & pnpm caches
+#              - Clean package manager cache (dnf)
 #              - Remove unused dependencies and old kernels
-# @distro  Ubuntu / Debian  → apt
-#          Rocky / RHEL / Fedora → dnf
+#              - (Optional) vacuum system logs
 # @example clean_up_disk
 clean_up_disk() {
     echo "Cleaning npm cache..."
     npm cache clean --force
 
-    echo "Cleaning pnpm store..."
+    echo "Cleaning pnpm cache..."
     pnpm store prune
 
-    # Detect package manager
-    if command -v apt-get &>/dev/null; then
-        echo "Detected apt (Ubuntu/Debian) — cleaning package cache..."
-        sudo apt-get clean
-        sudo apt-get autoclean
-        sudo apt-get autoremove -y
-        # Remove old kernel packages (keep current)
-        local current_kernel
-        current_kernel=$(uname -r)
-        echo "Current kernel: $current_kernel — removing older kernels..."
-        dpkg -l 'linux-image-*' 2>/dev/null \
-            | awk '/^ii/{print $2}' \
-            | grep -v "$current_kernel" \
-            | grep -v 'linux-image-generic' \
-            | xargs -r sudo apt-get remove -y --purge
-    elif command -v dnf &>/dev/null; then
-        echo "Detected dnf (Rocky/RHEL/Fedora) — cleaning package cache..."
-        sudo dnf clean all
-        sudo dnf autoremove -y
-        sudo dnf remove --oldinstallonly -y
-    else
-        echo "[WARN] No supported package manager found (apt/dnf). Skipping system cache cleanup."
-    fi
+    echo "Cleaning package manager cache (dnf)..."
+    sudo dnf clean all
 
-    echo "Disk cleanup completed."
+    echo "Removing unused dependencies..."
+    sudo dnf autoremove -y
+
+    echo "Removing old kernels..."
+    sudo dnf remove --oldinstallonly -y
+
+#    echo "Vacuuming system logs..."
+#    sudo journalctl --vacuum-size=500M
+
+    echo "Disk cleanup completed"
     df -h
 }
 alias clean-up-disk='clean_up_disk'
 alias cud='clean_up_disk'
 
 # @name sys_update
-# @description Update and upgrade system packages.
-# @distro  Ubuntu / Debian  → apt
-#          Rocky / RHEL / Fedora → dnf
+# @description Update and upgrade system packages (supports apt and dnf).
 # @example sys_update
 sys_update() {
     if command -v apt &>/dev/null; then
@@ -211,48 +184,62 @@ sys_maintain() {
     sys_update && clean_up_disk
 }
 alias sys-maint='sys_maintain'
-# =============================================================================
 
-# Quickly change to the uploads directory
+# =========================
+# --- Project Commands ---
+# =========================
+
+# Quickly change to uploads directory
 alias cduploads='cd /srv/www/bidsystem/uploads/'
 
 # @name run_project
 # @description Run a pnpm script inside a specific project directory.
-#              Avoids repetitive cd + pnpm commands, validates input,
-#              and improves developer experience.
-# @param $1 string  pnpm script name defined in package.json (default: "dev")
-# @param $2 string  Project directory path (default: /etc/moneytek/construction_pmis)
+#              Avoid repetitive cd + pnpm commands, validate input,
+#              and improve developer experience.
+# @param $1 string Project directory name under ~/projects, default: "project"
+# @param $2 string pnpm script name defined in package.json, default: "dev"
 # @example run_project
-# @example run_project dev /path/to/myproject
-# @example run_project start:prod /path/to/myproject
+# @example run_project dev <myproject>
+# @example run_project start:prod <myproject>
 run_project() {
+    # Set default values if parameters are missing
     local script="${1:-dev}"
     local project="${2:-/etc/moneytek/construction_pmis}"
 
-    cd "$project" || { echo "Project not found: $project"; return 1; }
+#    if [ -z "$1" ] || [ -z "$2" ]; then
+#        echo "Usage: run_project <project> <pnpm-script>"
+#        return 1
+#    fi
+
+    # Ensure target project exists before executing pnpm
+    cd "$project" || {
+        echo "Project not found: $project"
+        return 1
+    }
 
     echo "Running pnpm $script in $project"
     pnpm "$script"
 }
+
+# General alias to run project with parameters
 alias run-prj='run_project'
 
-# Shortcuts for the default project
+# Aliases for a specific project (replace 'myproject' with your actual project name)
 alias run-dev='run_project dev'
 alias run-prj-dev='run_project dev'
 alias run-prod='run_project start:prod'
 alias run-prj-prod='run_project start:prod'
+alias stop-dev='port=$(sss | grep 3001 | grep -oP "(?<=pid=)[0-9]+") && echo "Stopping Dev server on port 3001 (pid=${port})" && kill $port'
 
-# Stop the dev server running on port 3001
-alias stop-dev='port=$(sss | grep 3001 | grep -oP "(?<=pid=)[0-9]+") && echo "Stopping Dev server on port 3001 (pid=${port})" && kill "$port"'
 
-# =============================================================================
+# =========================
 # --- Package Utilities ---
-# =============================================================================
+# =========================
 
 # @name pkg_installed
 # @description Check if a package is installed (supports apt and dnf).
 # @param $1 string Package name to check
-# @example pkg_installed nginx
+# @example pkg_installed shfmt
 # @example pkg_installed git
 pkg_installed() {
     local pkg="$1"
@@ -267,7 +254,7 @@ pkg_installed() {
         return 1
     fi
 
-    # Detect package manager and check
+    # ── Detect package manager ────────────────────────────────────────────────
     if command -v dnf &>/dev/null; then
         dnf list installed "$pkg" &>/dev/null
     elif command -v apt &>/dev/null; then
@@ -277,6 +264,7 @@ pkg_installed() {
         return 2
     fi
 
+    # ── Result ────────────────────────────────────────────────────────────────
     if [[ $? -eq 0 ]]; then
         echo -e "${BG_GREEN}[V]${RESET} ${FG_GREEN}${pkg} is installed${RESET}"
         return 0
@@ -288,10 +276,9 @@ pkg_installed() {
 alias pi='pkg_installed'
 
 # @name pkg_ensure
-# @description Check if a package is installed; prompt to install if not.
-#              Supports apt (Ubuntu/Debian) and dnf (Rocky/RHEL).
+# @description Check if a package is installed, prompt to install if not (supports apt and dnf).
 # @param $1 string Package name to check and optionally install
-# @example pkg_ensure nginx
+# @example pkg_ensure shfmt
 # @example pkg_ensure git
 pkg_ensure() {
     local pkg="$1"
@@ -308,7 +295,7 @@ pkg_ensure() {
         return 1
     fi
 
-    # Detect package manager
+    # ── Detect package manager ────────────────────────────────────────────────
     local mgr=""
     if command -v dnf &>/dev/null; then
         mgr="dnf"
@@ -319,7 +306,7 @@ pkg_ensure() {
         return 2
     fi
 
-    # Check if already installed
+    # ── Check if already installed ────────────────────────────────────────────
     local installed=false
     if [[ "$mgr" == "dnf" ]]; then
         dnf list installed "$pkg" &>/dev/null && installed=true
@@ -332,9 +319,9 @@ pkg_ensure() {
         return 0
     fi
 
-    # Prompt to install
+    # ── Prompt to install ─────────────────────────────────────────────────────
     echo -e "${BG_RED}[X]${RESET} ${FG_RED}${pkg} is not installed${RESET}"
-    echo -e "${BG_YELLOW}[?]${RESET} ${FG_YELLOW}Install ${pkg} now? (y/N): ${RESET}\c"
+    echo -e "${BG_YELLOW}[?]${RESET} ${FG_YELLOW}Install ${pkg} now? (y/N):${RESET} \c"
     read -r answer
 
     if [[ "${answer,,}" == "y" ]]; then
@@ -357,3 +344,4 @@ pkg_ensure() {
     fi
 }
 alias pe='pkg_ensure'
+############################################################

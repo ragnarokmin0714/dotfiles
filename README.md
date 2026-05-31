@@ -268,7 +268,7 @@ Runs three sub-scripts in order:
 ### Shell Aliases Module
 
 **Entry point:** `system/aliases.sh`
-**Menu option:** 6
+**Menu option:** 7
 **Can also run standalone:** `sudo bash system/aliases.sh`
 
 Deploys four shell script files from `configs/alias/` to `~/.alias/` and ensures `~/.bashrc` sources the entry point.
@@ -277,15 +277,49 @@ Deploys four shell script files from `configs/alias/` to `~/.alias/` and ensures
 |---|---|
 | `.bash_aliases` | Entry point — sources the three modules below using `$_ALIAS_DIR` (portable, no hardcoded paths) |
 | `.bash_env` | `declare -A STYLE` with 30+ ANSI codes; `styled()` helper; `git_prompt()` with 9 status symbols; `build_ps1()` sets the custom PS1 |
-| `.bash_git` | `amend`, `gfm`, `gpm`, `gfp`, `gfap` aliases; `gswp` (interactive branch switch + pull); `gpcb` (push current branch with confirmation); `gcr` (checkout remote-only branch) |
-| `.bash_functions` | `get_ip`, `find_path (fp)`, `disk_usage_top (dut)`, `clean_up_disk (cud)`, `run_project (run-dev/run-prod)` and more |
+| `.bash_git` | `amend`, `safe-push`, `amend-safe-push`, `git-undo`, `git-drop`, `gfm`, `gpm`, `gfp`, `gfap` aliases; `gswp` (interactive branch switch + pull); `gpcb` (push current branch with confirmation); `gcr` (checkout remote-only branch) |
+| `.bash_functions` | System utils, ls variants, service management, datetime, NTP, `get_ip`, `find_path (fp)`, `disk_usage_top (dut)`, `clean_up_disk (cud)`, `sys_update (sup)`, `sys_maintain`, `run_project`, `pkg_installed (pi)`, `pkg_ensure (pe)` |
 
-**`clean_up_disk` distro support:**
+**`.bash_git` aliases reference:**
 
-| Distro | Package manager used |
+| Alias | Command | Description |
+|---|---|---|
+| `amend` | `git commit --amend --no-edit` | Amend last commit without changing message |
+| `safe-push` | `git push --force-with-lease` | Force push safely (won't overwrite others' work) |
+| `amend-safe-push` | amend + safe-push | Amend and force push in one step |
+| `git-undo` | `git reset --soft HEAD~1` | Undo last commit, keep changes staged |
+| `git-drop` | `git reset --hard HEAD~1` | Undo last commit, discard all changes |
+| `gfm` | `git fetch origin main && git merge origin/main` | Fetch + merge from origin/main |
+| `gpm` | `git pull origin main` | Pull from origin/main |
+| `gfp` | `git fetch --prune` | Fetch and prune stale refs |
+| `gfap` | `git fetch --all --prune` | Fetch all remotes and prune |
+| `gswp` | `git_switch_and_pull` | Interactively switch branch + pull |
+| `gpcb` | `git_push_current_branch` | Push current branch with confirmation |
+| `gcr` | `git_checkout_remote` | Checkout a remote-only branch interactively |
+
+**`.bash_functions` highlights:**
+
+| Category | Aliases / Functions |
 |---|---|
-| Ubuntu / Debian | `apt-get clean`, `apt-get autoremove`, removes old kernel images |
-| Rocky Linux / RHEL / Fedora | `dnf clean all`, `dnf autoremove`, `dnf remove --oldinstallonly` |
+| ls variants | `lh`, `lhu`, `lhc`, `lhs`, `lhx`, `lhtr`, `lht` |
+| Service mgmt | `svc-running`, `svc-failed`, `svc-all`, `svc-count`, `svc-status` |
+| Datetime | `now` (datetime), `today` (date), `time-now` (time) |
+| NTP | `ntp-sync`, `ntp-status`, `ntp-fix` |
+| Network | `netstats`, `sss`, `get-ip` |
+| File search | `fp` (`find_path`) |
+| Disk | `dut` (`disk_usage_top`), `cud` (`clean_up_disk`) |
+| System update | `sup` (`sys_update`), `sys-maint` (`sys_maintain`) |
+| Package check | `pi` (`pkg_installed`), `pe` (`pkg_ensure`) |
+| Project | `run-dev`, `run-prod`, `run-prj`, `stop-dev` |
+
+**Distro support in `.bash_functions`:**
+
+| Function | Ubuntu / Debian | Rocky Linux / RHEL |
+|---|---|---|
+| `clean_up_disk` | `apt-get clean/autoremove`, removes old kernels | `dnf clean all/autoremove/remove --oldinstallonly` |
+| `sys_update` | `apt update && apt upgrade` | `dnf update` |
+| `pkg_installed` | `dpkg -l` | `dnf list installed` |
+| `pkg_ensure` | `apt install` | `dnf install` |
 
 Writes the following block to `/etc/bashrc` (system-wide). If the block already exists it is removed first, then re-inserted — so re-running the script is always safe:
 
