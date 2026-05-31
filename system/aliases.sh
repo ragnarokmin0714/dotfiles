@@ -80,7 +80,7 @@ log_success "Alias files deployed to: $ALIAS_TARGET"
 BLOCK_START='# --- Shell alias modules (~/.alias/) ---'
 BLOCK_END='PROMPT_COMMAND=build_ps1'
 
-read -r -d '' ALIAS_BLOCK << 'EOF'
+read -r -d '' ALIAS_BLOCK << 'EOF' || true
 # --- Shell alias modules (~/.alias/) ---
 # Sources .bash_env (STYLE/git_prompt/build_ps1), .bash_git, .bash_functions
 [ -f ~/.alias/.bash_aliases ] && source ~/.alias/.bash_aliases
