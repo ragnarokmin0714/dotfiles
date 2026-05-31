@@ -70,6 +70,7 @@ show_menu() {
   local options=(
     "System Setup      (sudo, bashrc, apt packages)"
     "Network Setup     (static IP, DNS, firewall)"
+    "HTTPS Setup       (nginx install/reinstall + OpenSSL self-signed cert)"
     "Database Setup    (PostgreSQL, MySQL, Redis)"
     "Project Env Setup (Node.js, pnpm, Docker)"
     "ISO Build         (build custom Linux ISO)"
@@ -79,23 +80,24 @@ show_menu() {
   )
 
   echo -e "${COLOR_BOLD}Select a module to run:${COLOR_RESET}"
-  PS3=$'\nEnter your choice [1-8]: '   # Custom prompt for select
+  PS3=$'\nEnter your choice [1-9]: '   # Custom prompt for select
 
   select opt in "${options[@]}"; do
     case "$REPLY" in
-      1) _run_module "system"         ;;
-      2) _run_module "network"        ;;
-      3) _run_module "db"             ;;
-      4) _run_module "project"        ;;
-      5) _run_module "iso"            ;;
-      6) _run_module "system/aliases" ;;
-      7) _run_all                     ;;
-      8)
+      1) _run_module "system"          ;;
+      2) _run_module "network"         ;;
+      3) _run_module "network/https"   ;;
+      4) _run_module "db"              ;;
+      5) _run_module "project"         ;;
+      6) _run_module "iso"             ;;
+      7) _run_module "system/aliases"  ;;
+      8) _run_all                      ;;
+      9)
         log_info "Exiting dotfiles setup."
         exit 0
         ;;
       *)
-        log_warn "Invalid choice '$REPLY'. Please enter a number between 1 and 8."
+        log_warn "Invalid choice '$REPLY'. Please enter a number between 1 and 9."
         ;;
     esac
 

@@ -8,6 +8,9 @@ logs/*.log
 # Keep the logs directory itself in version control
 !logs/.gitkeep
 
+# Backup files
+*.bak
+
 # Editor and OS artifacts
 .DS_Store
 Thumbs.db

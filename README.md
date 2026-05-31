@@ -13,6 +13,7 @@
 | Network — static IP | ✅ Netplan | ✅ nmcli |
 | Network — DNS | ✅ systemd-resolved | ✅ NetworkManager |
 | Network — firewall | ✅ ufw | ✅ firewalld |
+| Network — HTTPS | ✅ nginx + openssl | ✅ nginx + openssl |
 | DB — PostgreSQL | ✅ PGDG apt | ✅ PGDG dnf |
 | DB — MySQL | ✅ apt + debconf | ✅ dnf + temp-pass |
 | DB — Redis | ✅ redis.io apt | ✅ EPEL |
@@ -37,6 +38,7 @@
 - [Module Reference](#module-reference)
   - [System](#system-module)
   - [Network](#network-module)
+  - [HTTPS Deployment](#https-deployment-module)
   - [Database](#database-module)
   - [Project Environment](#project-environment-module)
   - [ISO Build](#iso-build-module)
@@ -94,6 +96,16 @@ DB_NAME="appdb"
 NODE_VERSION="20"
 PNPM_VERSION="10"
 
+# HTTPS / Nginx
+NGINX_SERVER_NAME="example.com"  # Domain or hostname
+NGINX_HTTP_PORT=80
+NGINX_HTTPS_PORT=443
+SSL_DAYS=365
+SSL_COUNTRY="TW"
+SSL_STATE="Taiwan"
+SSL_CITY="Taipei"
+SSL_ORG="MyOrg"
+
 # ISO
 ISO_SOURCE="/path/to/ubuntu.iso"
 ISO_OUTPUT_DIR="$HOME/iso-build"
@@ -118,6 +130,7 @@ Displays a numbered menu. Enter a number to run the corresponding module.
 ```bash
 sudo bash install.sh --module system
 sudo bash install.sh --module network
+sudo bash install.sh --module network/https
 sudo bash install.sh --module db
 sudo bash install.sh --module project
 sudo bash install.sh --module iso
@@ -153,22 +166,26 @@ When you run `sudo bash install.sh`, you will see:
 Select a module to run:
 1) System Setup      (sudo, bashrc, apt packages)
 2) Network Setup     (static IP, DNS, firewall)
-3) Database Setup    (PostgreSQL, MySQL, Redis)
-4) Project Env Setup (Node.js, pnpm, Docker)
-5) ISO Build         (build custom Linux ISO)
-6) Run ALL Modules   (full environment deployment)
-7) Quit
+3) HTTPS Setup       (nginx install/reinstall + OpenSSL self-signed cert)
+4) Database Setup    (PostgreSQL, MySQL, Redis)
+5) Project Env Setup (Node.js, pnpm, Docker)
+6) ISO Build         (build custom Linux ISO)
+7) Shell Aliases     (deploy ~/.alias/ prompt + git + utils)
+8) Run ALL Modules   (full environment deployment)
+9) Quit
 ```
 
 | Option | Description |
 |---|---|
 | **1 — System Setup** | Installs base apt packages, configures sudo rules, deploys `.bashrc` |
-| **2 — Network Setup** | Sets static IP (optional), configures DNS, sets up ufw firewall |
-| **3 — Database Setup** | Installs and configures PostgreSQL, MySQL, Redis |
-| **4 — Project Env Setup** | Installs Docker, Node.js via nvm, pnpm, Python, Go |
-| **5 — ISO Build** | Builds a custom bootable Linux ISO with preseed for unattended install |
-| **6 — Run ALL** | Runs options 1–4 sequentially |
-| **7 — Quit** | Exit the setup tool |
+| **2 — Network Setup** | Sets static IP (optional), configures DNS, ufw firewall, then HTTPS |
+| **3 — HTTPS Setup** | Installs/reinstalls nginx, generates self-signed SSL cert via openssl, configures HTTPS virtual host |
+| **4 — Database Setup** | Installs and configures PostgreSQL, MySQL, Redis |
+| **5 — Project Env Setup** | Installs Docker, Node.js via nvm, pnpm, Python, Go |
+| **6 — ISO Build** | Builds a custom bootable Linux ISO with preseed for unattended install |
+| **7 — Shell Aliases** | Deploys `~/.alias/` shell modules (prompt, git helpers, utility functions) |
+| **8 — Run ALL** | Runs options 1–5 sequentially |
+| **9 — Quit** | Exit the setup tool |
 
 ---
 
@@ -193,10 +210,11 @@ dotfiles/
 │   └── aliases.sh              # Deploy ~/.alias/ shell modules (standalone)
 │
 ├── network/                    # Network configuration
-│   ├── setup.sh                # Module entry point
-│   ├── static-ip.sh            # Configure static IP via Netplan
-│   ├── dns.sh                  # Configure DNS via systemd-resolved
-│   └── firewall.sh             # Configure ufw firewall rules
+│   ├── setup.sh                # Module entry point (runs all 4 steps)
+│   ├── static-ip.sh            # Configure static IP via Netplan / nmcli
+│   ├── dns.sh                  # Configure DNS via systemd-resolved / NetworkManager
+│   ├── firewall.sh             # Configure ufw / firewalld rules
+│   └── https.sh                # Install nginx, generate SSL cert, deploy HTTPS vhost
 │
 ├── db/                         # Database installation
 │   ├── setup.sh                # Module entry point
@@ -297,8 +315,47 @@ PROMPT_COMMAND=build_ps1
 | `static-ip.sh` | Ubuntu: writes Netplan YAML + `netplan apply`. Rocky: configures via `nmcli` (NetworkManager). Skipped if `STATIC_IP` is empty. |
 | `dns.sh` | Ubuntu: writes `/etc/systemd/resolved.conf` + restarts `systemd-resolved`. Rocky: writes `/etc/NetworkManager/conf.d/dotfiles-dns.conf` + `/etc/resolv.conf`, restarts NetworkManager. |
 | `firewall.sh` | Ubuntu: `ufw` (default-deny, opens `FIREWALL_ALLOW_PORTS`). Rocky: `firewalld` (same port list, permanent rules, `firewall-cmd --reload`). |
+| `https.sh` | Installs/reinstalls nginx, generates a self-signed SSL cert+key via openssl, writes an HTTPS virtual host config, enables and restarts nginx. |
 
 > **Warning:** Ensure port 22 is in `FIREWALL_ALLOW_PORTS` before running `firewall.sh` to prevent SSH lockout.
+
+---
+
+### HTTPS Deployment Module
+
+**Entry point:** `network/https.sh`
+**Menu option:** 3
+**Can also run standalone:** `sudo bash network/https.sh`
+
+Deploys HTTPS on the server in four steps:
+
+| Step | What it does |
+|---|---|
+| 1 — Install nginx | Ubuntu: `apt-get install --reinstall nginx` (reinstall) or `apt-get install nginx` (fresh). Rocky: `dnf reinstall nginx` or `dnf install nginx`. |
+| 2 — Generate SSL cert | Runs `openssl req -x509` to create a 2048-bit RSA self-signed certificate and private key. Validity and subject fields are controlled by `SSL_*` variables in `lib/env.sh`. |
+| 3 — Write nginx config | Ubuntu: writes to `/etc/nginx/sites-available/dotfiles-https.conf`, symlinks to `sites-enabled/`, removes the default site. Rocky: writes to `/etc/nginx/conf.d/dotfiles-https.conf`. |
+| 4 — Enable nginx | `systemctl enable nginx && systemctl restart nginx`. Validates config with `nginx -t` before restarting. |
+
+**nginx virtual host behaviour:**
+- HTTP (port `NGINX_HTTP_PORT`) → 301 redirect to HTTPS
+- HTTPS (port `NGINX_HTTPS_PORT`) → serves `/var/www/html`, TLS 1.2/1.3 only
+
+**Key variables in `lib/env.sh`:**
+
+```bash
+NGINX_SERVER_NAME="localhost"   # Set to your real domain before running
+NGINX_HTTP_PORT=80
+NGINX_HTTPS_PORT=443
+SSL_CERT_DIR="/etc/ssl/certs"
+SSL_KEY_DIR="/etc/ssl/private"
+SSL_DAYS=365
+SSL_COUNTRY="TW"
+SSL_STATE="Taiwan"
+SSL_CITY="Taipei"
+SSL_ORG="dotfiles"
+```
+
+> **Note:** The generated certificate is **self-signed** and will trigger browser warnings. For production, replace the cert/key files with those issued by a trusted CA (e.g. Let's Encrypt `certbot`) — the nginx config path does not change.
 
 ---
 

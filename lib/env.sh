@@ -74,6 +74,20 @@ ISO_OUTPUT_DIR="$HOME/iso-build"           # Directory to write the built ISO
 ISO_LABEL="CUSTOM-LINUX"                   # Volume label for the built ISO
 
 # -----------------------------------------------------------------------------
+# HTTPS / Nginx configuration
+# -----------------------------------------------------------------------------
+NGINX_SERVER_NAME="localhost"              # Domain or hostname for the nginx virtual host
+NGINX_HTTP_PORT=80                         # HTTP listen port  (redirects to HTTPS)
+NGINX_HTTPS_PORT=443                       # HTTPS listen port
+SSL_CERT_DIR="/etc/ssl/certs"              # Directory to store the SSL certificate (.crt)
+SSL_KEY_DIR="/etc/ssl/private"             # Directory to store the private key (.key)
+SSL_DAYS=365                               # Self-signed certificate validity in days
+SSL_COUNTRY="TW"                           # Certificate subject: 2-letter country code
+SSL_STATE="Taiwan"                         # Certificate subject: state / province
+SSL_CITY="Taipei"                          # Certificate subject: city / locality
+SSL_ORG="dotfiles"                         # Certificate subject: organisation name
+
+# -----------------------------------------------------------------------------
 # Shell configuration
 # -----------------------------------------------------------------------------
 SHELL_TYPE="bash"                          # Target shell: bash | zsh
