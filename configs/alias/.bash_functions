@@ -54,12 +54,83 @@ alias today='date +"%Y-%m-%d"'
 alias time-now='date +"%H:%M:%S"'
 
 # --- NTP / Time Sync ---
-# Enable NTP and restart time sync service
-alias ntp-sync='sudo chronyc makestep && sudo hwclock --systohc && chronyc tracking && timedatectl'
-# Show current time sync status
-alias ntp-status='timedatectl status && timedatectl timesync-status'
-# Fix NTP sync and verify result
-alias ntp-fix='sudo timedatectl set-ntp true && sudo systemctl restart systemd-timesyncd && sleep 3 && timedatectl status'
+# Ubuntu/Debian uses systemd-timesyncd; Rocky/RHEL uses chronyd.
+# All three functions below auto-detect the active NTP daemon.
+
+# @name ntp_sync
+# @description Step the clock immediately and sync hardware clock.
+#              Rocky: chronyc makestep. Ubuntu: timedatectl only.
+# @example ntp_sync
+# @example ntp-sync
+ntp_sync() {
+    if command -v chronyc &>/dev/null; then
+        sudo chronyc makestep
+        sudo hwclock --systohc
+        chronyc tracking
+    else
+        sudo timedatectl set-ntp true
+    fi
+    timedatectl
+}
+alias ntp-sync='ntp_sync'
+
+# @name ntp_status
+# @description Show current NTP sync status.
+#              Rocky: chronyc tracking. Ubuntu: timedatectl timesync-status.
+# @example ntp_status
+# @example ntp-status
+ntp_status() {
+    timedatectl status
+    if command -v chronyc &>/dev/null; then
+        echo "--- chronyc tracking ---"
+        chronyc tracking
+    elif systemctl is-active --quiet systemd-timesyncd 2>/dev/null; then
+        echo "--- timesync-status ---"
+        timedatectl timesync-status
+    fi
+}
+alias ntp-status='ntp_status'
+
+# @name ntp_fix
+# @description Enable NTP and restart the appropriate time sync service.
+#              Rocky: chronyd. Ubuntu: systemd-timesyncd.
+# @example ntp_fix
+# @example ntp-fix
+ntp_fix() {
+    sudo timedatectl set-ntp true
+    if command -v chronyd &>/dev/null || systemctl list-unit-files 2>/dev/null | grep -q 'chronyd.service'; then
+        echo "Restarting chronyd..."
+        sudo systemctl restart chronyd
+    elif systemctl list-unit-files 2>/dev/null | grep -q 'systemd-timesyncd.service'; then
+        echo "Restarting systemd-timesyncd..."
+        sudo systemctl restart systemd-timesyncd
+    else
+        echo "[WARN] No known NTP service found (chronyd / systemd-timesyncd)"
+    fi
+    sleep 3
+    timedatectl status
+}
+alias ntp-fix='ntp_fix'
+
+# @name reload_shell
+# @description Reload the current shell by sourcing the system-wide bashrc.
+#              Auto-detects /etc/bashrc (Rocky/RHEL) or /etc/bash.bashrc (Ubuntu/Debian).
+# @example reload_shell
+# @example rl
+reload_shell() {
+    if [[ -f /etc/bashrc ]]; then
+        # shellcheck disable=SC1091
+        source /etc/bashrc
+        echo "[OK] Reloaded /etc/bashrc"
+    elif [[ -f /etc/bash.bashrc ]]; then
+        # shellcheck disable=SC1091
+        source /etc/bash.bashrc
+        echo "[OK] Reloaded /etc/bash.bashrc"
+    else
+        echo "[WARN] No system bashrc found — try: source ~/.bashrc"
+    fi
+}
+alias rl='reload_shell'
 
 # @name get_ip
 # @description Get primary IPv4 address for prompt display.
@@ -147,11 +218,20 @@ alias dut='disk_usage_top'
 #          Rocky / RHEL / Fedora → dnf
 # @example clean_up_disk
 clean_up_disk() {
-    echo "Cleaning npm cache..."
-    npm cache clean --force
+    # Guard: only run if tools are installed
+    if command -v npm &>/dev/null; then
+        echo "Cleaning npm cache..."
+        npm cache clean --force
+    else
+        echo "[SKIP] npm not installed — skipping npm cache cleanup."
+    fi
 
-    echo "Cleaning pnpm store..."
-    pnpm store prune
+    if command -v pnpm &>/dev/null; then
+        echo "Cleaning pnpm store..."
+        pnpm store prune
+    else
+        echo "[SKIP] pnpm not installed — skipping pnpm store cleanup."
+    fi
 
     # Detect package manager
     if command -v apt-get &>/dev/null; then
