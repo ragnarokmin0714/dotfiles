@@ -49,10 +49,20 @@ if [[ ! -d "$ALIAS_SOURCE" ]]; then
 fi
 
 # --- Backup existing .alias if present ---
-if [[ -d "$ALIAS_TARGET" ]]; then
+if [[ -L "$ALIAS_TARGET" ]]; then
+  # It's a symlink — remove the symlink only, do not touch the target
+  log_warn "$ALIAS_TARGET is a symlink — removing symlink before deploying real directory."
+  rm "$ALIAS_TARGET"
+elif [[ -d "$ALIAS_TARGET" ]]; then
+  # It's a real directory — back it up with a timestamp
   ALIAS_BACKUP="${ALIAS_TARGET}.bak.$(date +%Y%m%d_%H%M%S)"
   cp -r "$ALIAS_TARGET" "$ALIAS_BACKUP"
   log_info "Existing $ALIAS_TARGET backed up to: $ALIAS_BACKUP"
+
+  # Prune old backups — keep only the 3 most recent
+  find "$(dirname "$ALIAS_TARGET")" -maxdepth 1 -name ".alias.bak.*" -type d \
+    | sort -r | tail -n +4 | xargs -r rm -rf
+  log_info "Old backups pruned (keeping 3 most recent)."
 fi
 
 # --- Create target and copy files ---
@@ -100,4 +110,6 @@ else
 fi
 
 log_success "Shell aliases setup complete."
-log_info "Open a new terminal (or run: source ${SYSTEM_BASHRC:-/etc/bashrc}) to apply changes."
+log_info "Apply changes in the current terminal:"
+log_info "  source ${SYSTEM_BASHRC:-/etc/bashrc}"
+log_info "After that, use 'rl' to reload anytime."
