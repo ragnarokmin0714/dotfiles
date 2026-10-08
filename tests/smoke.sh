@@ -1,125 +1,89 @@
 #!/usr/bin/env bash
 # =============================================================================
-# tests/smoke.sh — Smoke Test for configs/alias Modules
+# tests/smoke.sh — the runtime library (configs/alias), sourced like its users do
 # =============================================================================
-# Sources configs/alias/.bash_aliases in a CLEAN bash process (env -i,
-# --norc --noprofile) and asserts the public surface is actually defined:
+# Each check runs in a CLEAN bash (env -i, no rc files) that sources the entry point
+# the way one of its three consumers does:
+#   - strict mode (set -euo pipefail), as lib/core.sh and the cron scripts do -- a
+#     module whose last line returns non-zero kills such a caller silently;
+#   - with no terminal, which is what cron and pipes look like: confirm must say no,
+#     menus must cancel, nothing may wait for input;
+#   - on both distro families (OS_FAMILY preset): the platform globals must agree.
 #
-#   - key functions from every module (env / git / functions / pkg / nginx)
-#   - key aliases
-#   - _pkg_manager resolves to apt or dnf on this host
-#   - log framework emits the message it was given
-#   - build_ps1 runs and produces a non-empty PS1
-#   - sourcing the entry point twice is safe (idempotent)
-#
-# USAGE:
-#   bash tests/smoke.sh         # no root required
-#
-# EXIT CODE: 0 = all assertions passed, 1 = at least one failed
-#
-# NOTE: deliberately standalone — does not source lib/ so the test harness
-#       never depends on code adjacent to the code under test.
+# USAGE: bash tests/smoke.sh        (no root needed)
+# EXIT:  0 all passed, 1 any failed
+# Standalone: it only sources the library under test, never lib/.
 # =============================================================================
 set -uo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENTRY="$ROOT/configs/alias/.bash_aliases"
+pass=0 fail=0
 
-DOTFILES_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENTRY="$DOTFILES_ROOT/configs/alias/.bash_aliases"
+# run <label> <family|-> <script>: the script runs after sourcing the library in a
+# clean, strict, terminal-less bash; it passes when it exits 0.
+run() {
+    local label="$1" family="$2" script="$3" out
+    local -a env=(HOME="$HOME" USER="${USER:-$(id -un)}" TERM=dumb
+                  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin)
+    local -a preset=()
+    [[ "$family" != - ]] && read -ra preset <<< "$family"
+    env+=("${preset[@]}")
+    if out=$(env -i "${env[@]}" bash --noprofile --norc -c "set -euo pipefail; source '$ENTRY'; $script" </dev/null 2>&1); then
+        printf '  ok    %s\n' "$label"; pass=$((pass + 1))
+    else
+        printf '  FAIL  %s\n%s\n' "$label" "$(sed 's/^/        /' <<< "$out" | tail -8)"; fail=$((fail + 1))
+    fi
+}
 
-if [[ ! -f "$ENTRY" ]]; then
-  echo "FAIL: entry point not found: $ENTRY" >&2
-  exit 1
-fi
-
-# All assertions run inside one clean bash: no inherited env, rc files,
-# aliases, or functions — only HOME/PATH/TERM/USER survive.
-env -i \
-  HOME="$HOME" \
-  USER="${USER:-$(id -un)}" \
-  PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-  TERM=dumb \
-  ENTRY="$ENTRY" \
-  bash --noprofile --norc << 'EOF'
-pass=0
-fail=0
-
-t_ok()   { printf '  ok    %s\n' "$1"; pass=$((pass + 1)); }
-t_fail() { printf '  FAIL  %s\n' "$1"; fail=$((fail + 1)); }
-
-echo "== source entry point =="
-if source "$ENTRY"; then
-  t_ok "source $ENTRY"
-else
-  t_fail "source $ENTRY"
-  echo "SMOKE: FAIL ($fail failed)"
-  exit 1
-fi
+echo "== loading =="
+run "sources under set -euo pipefail" - 'true'
+run "sources twice (re-source from rs)" - 'source "'"$ENTRY"'"'
+run "every module present" - '(( ${#ALIAS_MODULES[@]} >= 10 ))'
 
 echo ""
-echo "== functions defined =="
-FUNCS=(
-  # .bash_env
-  styled git_prompt build_ps1
-  log_ok log_err log_warn log_info log_step log_head log_banner
-  # .bash_git
-  git_fetch_merge git_push_current_branch git_switch_and_pull
-  # .bash_functions
-  clean_up_disk ntp_status ntp_fix deploy_alias free_mem tz
-  stop_dev reload_shell get_ip disk_usage_top
-  # .bash_pkg
-  _pkg_manager pkg_installed pkg_ensure pkg_remove sys_toolkit
-  sys_update sys_maintain multiselect
-  # .bash_nginx
-  nginx_status nginx_log nginx_test_reload nginx_vhost_list
-)
-for fn in "${FUNCS[@]}"; do
-  if declare -F "$fn" > /dev/null; then t_ok "function $fn"; else t_fail "function $fn"; fi
-done
+echo "== platform globals =="
+run "this host is detected and supported" - '[[ $OS_FAMILY == debian || $OS_FAMILY == rhel ]] && os_supported && [[ -n $PKG_MGR ]]'
+run "debian family: apt, /etc/bash.bashrc" "OS_FAMILY=debian OS_ID=ubuntu OS_VERSION=20.04" \
+    '[[ $PKG_MGR == apt && $SYS_BASHRC == /etc/bash.bashrc ]] && os_supported'
+run "rhel family: dnf, /etc/bashrc" "OS_FAMILY=rhel OS_ID=rocky OS_VERSION=9.4" \
+    '[[ $PKG_MGR == dnf && $SYS_BASHRC == /etc/bashrc && $OS_MAJOR == 9 ]] && os_supported'
+run "RHEL 8 / Ubuntu 18.04 are refused" - \
+    '! OS_FAMILY=rhel OS_ID=rhel OS_MAJOR=8 os_supported && ! OS_FAMILY=debian OS_ID=ubuntu OS_MAJOR=18 os_supported'
+run "SUDO is empty only for root" - '[[ $EUID -eq 0 && -z $SUDO ]] || [[ $EUID -ne 0 && $SUDO == sudo ]]'
+run "git is in the toolkit" - '[[ " ${SYS_TOOLKIT[*]} " == *" git "* ]]'
 
 echo ""
-echo "== aliases defined =="
-ALIASES=(
-  pi pe prm rs cud sup fm dut
-  gfm gpcb gswp amend
-  ntp-status ntp-fix sys-toolkit
-  ngs ngl nginx-status
-  cdaliases cdlog
-)
-for al in "${ALIASES[@]}"; do
-  if alias "$al" > /dev/null 2>&1; then t_ok "alias $al"; else t_fail "alias $al"; fi
-done
+echo "== package names =="
+run "dnf: build-essential -> gcc gcc-c++ make" - '[[ "$(_pkg_name dnf build-essential)" == "gcc gcc-c++ make" ]]'
+run "apt: ShellCheck -> shellcheck" - '[[ "$(_pkg_name apt ShellCheck)" == shellcheck ]]'
+run "unmapped names pass through" - '[[ "$(_pkg_name apt jq)" == jq ]]'
+run "rhel dry run installs EPEL first, mapped names" "OS_FAMILY=rhel OS_ID=rocky OS_VERSION=9.4" \
+    'out=$(sys_toolkit -n); grep -q "epel-release" <<< "$out" && grep -q "dnf install -y git" <<< "$out"'
+run "RHEL itself enables CRB through subscription-manager" "OS_FAMILY=rhel OS_ID=rhel OS_VERSION=9.4" \
+    'pkg_enable_epel -n | grep -q "subscription-manager repos --enable codeready-builder-for-rhel-9"'
 
 echo ""
-echo "== behavior =="
-pm="$(_pkg_manager)"
-case "$pm" in
-  apt | dnf) t_ok "_pkg_manager resolves to '$pm'" ;;
-  *)         t_fail "_pkg_manager resolves to '$pm' (expected apt or dnf)" ;;
-esac
-
-out="$(log_ok smoke-probe 2>&1)"
-if [[ "$out" == *smoke-probe* ]]; then
-  t_ok "log_ok emits its message"
-else
-  t_fail "log_ok emits its message (got: '$out')"
-fi
-
-if build_ps1 > /dev/null 2>&1 && [[ -n "${PS1:-}" ]]; then
-  t_ok "build_ps1 runs and sets PS1"
-else
-  t_fail "build_ps1 runs and sets PS1"
-fi
-
-if source "$ENTRY" > /dev/null 2>&1; then
-  t_ok "double source is safe"
-else
-  t_fail "double source is safe"
-fi
+echo "== no terminal: nothing waits, nothing destructive =="
+run "confirm says no" - '! confirm "Delete everything?"'
+run "UI_ASSUME_YES=1 makes confirm say yes" - 'UI_ASSUME_YES=1 confirm "Proceed?"'
+run "ask fails instead of waiting" - '! ask v "Name"'
+run "radioselect cancels at end of input" - '! radioselect v "Pick" 0 a b c && [[ -z $v ]]'
+run "multiselect cancels at end of input" - '! multiselect v "Pick" a b c 2>/dev/null && [[ -z $v ]]'
+run "a git menu command fails with usage" - 'cd "'"$ROOT"'"; out=$(git_switch_and_pull 2>&1) && exit 1; grep -q usage <<< "$out"'
+run "gds without indices fails with usage" - 'cd "'"$ROOT"'"; ! git_drop_stashes >/dev/null 2>&1 || ! git stash list | grep -q .'
 
 echo ""
-echo "Assertions: $pass passed, $fail failed"
-if [[ "$fail" -ne 0 ]]; then
-  echo "SMOKE: FAIL"
-  exit 1
-fi
+echo "== commands =="
+run "every public command has its alias" - 'for a in pi pe prm toolkit sup cud chc dut ds dg gfm gpcb gswp gcr gds gcmb grd gfl amend rs fp fm ngs nvm-i nvm-up; do alias "$a" >/dev/null; done'
+run "-h prints usage and succeeds" - 'for f in sys_update clean_up_disk clean_home_caches sys_toolkit pkg_install run_project stop_dev tz git_clean_merged git_drop_stashes; do $f -h | grep -q usage; done'
+run "unknown options are refused" - '! sys_update --bogus 2>/dev/null && ! clean_up_disk --bogus 2>/dev/null'
+run "sys_update -n prints, runs nothing" - 'sys_update -n | grep -q "upgrade"'
+run "clean_home_caches -n deletes nothing" - 'clean_home_caches -n >/dev/null'
+run "log helpers write the DOTFILES_LOG_FILE sink" - 'f=$(mktemp); DOTFILES_LOG_FILE=$f log_ok probe >/dev/null; grep -q "\[OK\] probe" "$f"; rm -f "$f"'
+run "prompt hook is added once and keeps PROMPT_COMMAND" - 'PROMPT_COMMAND=title; prompt_enable; prompt_enable; [[ $PROMPT_COMMAND == "build_ps1;title" ]]'
+run "build_ps1 sets a prompt" - 'build_ps1; [[ $PS1 == *"\\W"* ]]'
+
+echo ""
+echo "Assertions: ${pass} passed, ${fail} failed"
+(( fail == 0 )) || { echo "SMOKE: FAIL"; exit 1; }
 echo "SMOKE: PASS"
-EOF

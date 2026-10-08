@@ -1,0 +1,49 @@
+# CI: static checks on the runner, then the runtime library and the deploy framework
+# inside each supported distro. The deploy suite only writes into --root sandboxes and
+# runs no commands, so plain containers are enough -- no systemd, no VM.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+      - run: bash tests/lint.sh
+
+  distro:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - ubuntu:20.04
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - rockylinux/rockylinux:9
+          - registry.access.redhat.com/ubi9/ubi   # RHEL 9 userland
+    steps:
+      # git before checkout, so the workspace is a real repository (the git helpers
+      # are tested against it); logrotate and sudo (visudo) let the deploy suite run
+      # those validators instead of skipping them.
+      - name: Tools the tests use
+        run: |
+          if command -v apt-get >/dev/null; then
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git logrotate sudo file iproute2 >/dev/null
+          else
+            dnf install -y -q git sudo tar findutils file iproute procps-ng
+            dnf install -y -q logrotate || echo "logrotate unavailable here -- its check will be skipped"
+          fi
+      - uses: actions/checkout@v4
+      - name: Trust the workspace (the container user differs from its owner)
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      - run: bash tests/smoke.sh
+      - run: bash tests/deploy.sh

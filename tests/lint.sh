@@ -1,70 +1,72 @@
 #!/usr/bin/env bash
 # =============================================================================
-# tests/lint.sh — Static Checks (bash -n + shellcheck)
+# tests/lint.sh — static checks: syntax, shellcheck, and the repo's own rules
 # =============================================================================
-# Runs two static passes over every shell file in the repo:
-#   1. bash -n     — pure syntax check
-#   2. shellcheck  — static analysis, severity >= warning
-#                    (repo policy lives in the root .shellcheckrc)
+# 1. bash -n on every shell file
+# 2. shellcheck (severity >= warning; policy in .shellcheckrc)
+# 3. policy -- the conventions in .claude/CLAUDE.md that code can check, checked by
+#    code rather than by memory:
+#      - the runtime library asks questions only through .bash_ui (confirm / ask /
+#        radioselect / multiselect): no hand-rolled `read -p` prompts elsewhere;
+#      - root commands go through $SUDO, never a literal `sudo`, so they also run
+#        where sudo is absent and as root;
+#      - every deploy module declares @desc and @order and starts through lib/core.sh.
 #
-# USAGE:
-#   bash tests/lint.sh          # no root required
-#
-# EXIT CODE: 0 = all clean, 1 = at least one finding
-#
-# NOTE: deliberately standalone — does not source lib/ so it still runs
-#       when lib/ itself is the thing that's broken.
+# USAGE: bash tests/lint.sh        (no root needed)
+# EXIT:  0 clean, 1 at least one finding
+# Standalone on purpose: sources neither lib/ nor configs/alias, so a broken
+# library cannot break the check that is meant to catch it.
 # =============================================================================
 set -uo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
-DOTFILES_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$DOTFILES_ROOT" || exit 1
-
-# Files under test: executable scripts + sourced alias modules
-SCRIPTS=(install.sh lib/*.sh system/*.sh tests/*.sh)
-MODULES=(configs/alias/.bash_*)
-
+mapfile -t SCRIPTS < <(ls install.sh config.sh config.local.example.sh lib/*.sh modules/*/main.sh \
+    configs/sbin/* configs/claude/hooks/*.sh tests/*.sh)
+mapfile -t LIBRARY < <(ls configs/alias/.bash_*)
 fail=0
+ok()  { printf '  ok    %s\n' "$1"; }
+bad() { printf '  FAIL  %s\n' "$1"; fail=1; }
 
-echo "== bash -n (syntax) =="
-for f in "${SCRIPTS[@]}" "${MODULES[@]}"; do
-  if bash -n "$f" 2>&1; then
-    printf '  ok    %s\n' "$f"
-  else
-    printf '  FAIL  %s\n' "$f"
-    fail=1
-  fi
+echo "== bash -n =="
+for f in "${SCRIPTS[@]}" "${LIBRARY[@]}"; do
+    if bash -n "$f" 2>&1; then ok "$f"; else bad "$f"; fi
 done
 
 echo ""
-echo "== shellcheck (severity >= warning) =="
-SHELLCHECK="$(command -v shellcheck || true)"
-if [[ -z "$SHELLCHECK" && -x "$HOME/.local/bin/shellcheck" ]]; then
-  SHELLCHECK="$HOME/.local/bin/shellcheck"
-fi
-if [[ -z "$SHELLCHECK" ]]; then
-  echo "FAIL: shellcheck not found (looked in PATH and ~/.local/bin)." >&2
-  echo "      Via the alias toolkit:  pe -m apt shellcheck   (or: sys_toolkit -o)" >&2
-  echo "      Manual install:         https://github.com/koalaman/shellcheck#installing" >&2
-  exit 1
-fi
-
-# Executable scripts carry their own shebang; alias modules are sourced
-# files without one, so tell shellcheck they are bash.
-if "$SHELLCHECK" -S warning "${SCRIPTS[@]}"; then
-  printf '  ok    %d script(s)\n' "${#SCRIPTS[@]}"
+echo "== shellcheck =="
+SHELLCHECK="$(command -v shellcheck || echo "$HOME/.local/bin/shellcheck")"
+if [[ ! -x "$SHELLCHECK" ]]; then
+    bad "shellcheck not found -- install it (toolkit: pe shellcheck) or https://github.com/koalaman/shellcheck"
 else
-  fail=1
-fi
-if "$SHELLCHECK" -S warning -s bash "${MODULES[@]}"; then
-  printf '  ok    %d alias module(s)\n' "${#MODULES[@]}"
-else
-  fail=1
+    # -x follows `source` lines that name a repo path (# shellcheck source=...)
+    if "$SHELLCHECK" -x -S warning "${SCRIPTS[@]}"; then ok "${#SCRIPTS[@]} scripts"; else fail=1; fi
+    if "$SHELLCHECK" -S warning -s bash "${LIBRARY[@]}"; then ok "${#LIBRARY[@]} library modules"; else fail=1; fi
 fi
 
 echo ""
-if [[ "$fail" -ne 0 ]]; then
-  echo "LINT: FAIL"
-  exit 1
-fi
+echo "== policy =="
+# Questions go through .bash_ui. `read -r -a`, `read -rs -n1` (the engines) and reads
+# from pipes/heredocs are fine; a prompt (-p) outside .bash_ui is not.
+hits=$(grep -nE '\bread[[:space:]]+(-[A-Za-z]+[[:space:]]+)*-[A-Za-z]*p' "${LIBRARY[@]}" | grep -v '^configs/alias/.bash_ui:' || true)
+if [[ -z "$hits" ]]; then ok "prompts only in .bash_ui"; else bad "hand-rolled prompt (use confirm / ask / radioselect):"; echo "$hits"; fi
+
+# A literal sudo at the start of a command, in the library or the maintenance scripts.
+# Messages that tell the user what to type ("-> sudo growpart ...") are inside quotes,
+# and `sudo -v` (refresh credentials, for non-root only) is allowed.
+# Quoted text is blanked before matching, comments are skipped.
+hits=$(awk '
+    { line = $0; gsub(/"[^"]*"/, "\"\"", line); gsub(/'"'"'[^'"'"']*'"'"'/, "", line) }
+    line ~ /^[[:space:]]*#/ { next }
+    line ~ /(^|[;&|(]|\$\()[[:space:]]*sudo[[:space:]]/ && line !~ /sudo -v/ { print FILENAME ":" FNR ": " $0 }
+' "${LIBRARY[@]}" configs/sbin/*)
+if [[ -z "$hits" ]]; then ok "root commands use \$SUDO"; else bad "literal sudo (use \$SUDO):"; echo "$hits"; fi
+
+for m in modules/*/main.sh; do
+    grep -q '^# @desc ' "$m" && grep -q '^# @order ' "$m" \
+        && grep -q 'lib/core.sh' "$m" && ok "$m header" \
+        || bad "$m: needs '# @desc', '# @order' and to source lib/core.sh"
+done
+
+echo ""
+if (( fail )); then echo "LINT: FAIL"; exit 1; fi
 echo "LINT: PASS"
