@@ -1,0 +1,43 @@
+# cat << 'EOF' | sudo tee /etc/logrotate.d/sys-maint
+cat > /etc/logrotate.d/sys-maint << 'EOF'
+/var/log/sys-maint.log {
+    ## Rotate immediately if log exceeds 50MB, even before the scheduled time
+    #maxsize 50M
+    ## Skip rotation if log is smaller than 1MB, even if scheduled time has passed
+    #minsize 1M
+    ## Rotate only when log exceeds 100MB, regardless of schedule
+    #size 100M
+    # rotate every day
+    daily
+    # keep 7 days of logs
+    rotate 7
+    # compress old logs (.gz)
+    compress
+    # compress previous log, not current
+    delaycompress
+    # no error if log file is missing
+    missingok
+    # skip rotation if log is empty
+    notifempty
+    # create new log with permissions
+    create 0640 root root
+    # use date as log filename suffix
+    dateext
+    # e.g. sys-maint.log-2026-05-25
+    dateformat -%Y-%m-%d
+}
+EOF
+
+# 測試指令：
+# - -d 是 dry run（模擬執行） 模式。
+#sudo logrotate -d /etc/logrotate.d/sys-maint
+
+# --- 查看目前排程 ---
+## systemd 系統
+#systemctl list-timers | grep logrotate
+## cron 系統
+#cat /etc/cron.daily/logrotate
+# --- 自訂執行時間 ---
+#sudo systemctl edit logrotate.timer
+#[Timer]
+#OnCalendar=*-*-* 02:00:00   # 每天凌晨 2 點
