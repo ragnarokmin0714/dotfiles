@@ -1,0 +1,21 @@
+{
+    "permissions": {
+        "allow": [
+            "Bash(git check-ignore*)",
+            "Bash(git ls-files*)"
+        ]
+    },
+    "hooks": {
+        "PreToolUse": [
+            {
+                "matcher": "Bash",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/block-bash-bypass.sh\""
+                    }
+                ]
+            }
+        ]
+    }
+}
