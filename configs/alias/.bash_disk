@@ -1,3 +1,6 @@
+#!/usr/bin/env bash
+# @file .bash_disk
+# @brief Disk: inspect (disk_status, dut), clean up (cud) and grow (disk_grow).
 # =========================
 # --- Disk ---
 # =========================
@@ -68,10 +71,10 @@ _disk_grow_hints() {
         local pv dev_size pv_size vg vfree
         while read -r pv dev_size pv_size; do
             (( dev_size - pv_size >= gib )) && echo "${pv}: PV smaller than its device -> sudo pvresize ${pv}"
-        done < <(sudo pvs --noheadings --units b --nosuffix -o pv_name,dev_size,pv_size)
+        done < <($SUDO pvs --noheadings --units b --nosuffix -o pv_name,dev_size,pv_size)
         while read -r vg vfree; do
             (( vfree >= gib )) && echo "VG ${vg}: $(( vfree / gib )) GiB free -> sudo lvextend -r -l +100%FREE /dev/${vg}/<lv>"
-        done < <(sudo vgs --noheadings --units b --nosuffix -o vg_name,vg_free)
+        done < <($SUDO vgs --noheadings --units b --nosuffix -o vg_name,vg_free)
     fi
 
     # Bind mounts carry "dev[/path]" as SOURCE, which lsblk rejects -> skipped
@@ -128,14 +131,14 @@ disk_status() {
         log_warn "Skipped -- needs root"
     else
         # pvs prints nothing (exit 0) when there are no PVs
-        pv_table=$(sudo pvs -o +dev_size)
+        pv_table=$($SUDO pvs -o +dev_size)
         if [[ -z "$pv_table" ]]; then
             lvm=absent
             log_info "No LVM physical volumes"
         else
             echo "$pv_table"
             echo ""
-            sudo vgs
+            $SUDO vgs
         fi
     fi
     echo ""
@@ -176,48 +179,52 @@ alias disk-usage-top='disk_usage_top'
 alias dut='disk_usage_top'
 
 # @name clean_up_disk
-# @description Perform comprehensive disk cleanup:
-#              - Clean npm & pnpm caches
-#              - Clean the package manager cache (apt or dnf, via _pkg_manager)
-#              - Remove unused dependencies and old kernels: apt autoremove covers
-#                both on Ubuntu; dnf needs a separate remove --oldinstallonly
-#              - (Optional) vacuum system logs
-#              sys_maintain calls this, and on hosts set up with
-#              /usr/local/sbin/sys-maint.sh that runs from cron -- keep every step
-#              non-interactive (-y), or the cron run hangs.
-# @depends _pkg_manager
-# @example clean_up_disk
+# @description Free disk space from regenerable caches: npm and pnpm caches (when
+#              installed), the package manager cache, unused dependencies and old
+#              kernels (apt autoremove covers both; dnf needs remove --oldinstallonly).
+#              sys_maintain calls this, and sys-maint.sh runs that from cron -- so
+#              every step is non-interactive and a missing tool is skipped, not fatal.
+# @param -n | --dry-run  flag  Print the steps, run nothing
+# @param -y | --yes      flag  Accepted for symmetry with sys_maintain (nothing asks)
+# @example cud
+# @example cud -n
 clean_up_disk() {
-    local mgr
-    mgr=$(_pkg_manager) || { log_err "No supported package manager found (apt/dnf)"; return 1; }
+    local dry=0 usage="usage: clean_up_disk [-n] [-y]"
+    while (( $# )); do
+        case "$1" in
+            -n | --dry-run) dry=1 ;;
+            -y | --yes)     ;;
+            -h | --help)    echo "$usage"; return 0 ;;
+            *) log_err "Unknown option: $1 -- ${usage}"; return 1 ;;
+        esac
+        shift
+    done
 
-    log_info "Cleaning npm cache..."
-    npm cache clean --force
-
-    log_info "Cleaning pnpm cache..."
-    pnpm store prune
-
-    log_info "Cleaning package manager cache (${mgr})..."
-    case "$mgr" in
-        apt)
-            sudo apt clean
-            log_info "Removing unused dependencies and old kernels..."
-            sudo apt autoremove -y
-            ;;
-        dnf)
-            sudo dnf clean all
-            log_info "Removing unused dependencies..."
-            sudo dnf autoremove -y
-            log_info "Removing old kernels..."
-            sudo dnf remove --oldinstallonly -y
-            ;;
+    local -a steps=()
+    command -v npm  &>/dev/null && steps+=("npm cache clean --force")
+    command -v pnpm &>/dev/null && steps+=("pnpm store prune")
+    case "$PKG_MGR" in
+        apt) steps+=("$SUDO apt-get clean" "$SUDO env DEBIAN_FRONTEND=noninteractive apt-get autoremove -y") ;;
+        dnf) steps+=("$SUDO dnf clean all" "$SUDO dnf autoremove -y" "$SUDO dnf remove --oldinstallonly -y") ;;
+        *)   log_err "No supported package manager (OS family: ${OS_FAMILY})"; return 1 ;;
     esac
 
-#    log_info "Vacuuming system logs..."
-#    sudo journalctl --vacuum-size=500M
-
-    log_ok "Disk cleanup completed"
-    df -h
+    if (( dry )); then
+        log_info "Dry run -- would run:"
+        printf '  %s\n' "${steps[@]# }"
+        return 0
+    fi
+    local step rc=0
+    local -a argv
+    for step in "${steps[@]}"; do
+        read -ra argv <<< "$step"
+        log_info "Running: ${step# }"
+        # dnf exits 1 when there are no old kernels to remove -- not a failure
+        "${argv[@]}" || [[ "$step" == *oldinstallonly* ]] || { log_warn "Failed: ${step# }"; rc=1; }
+    done
+    (( rc )) && log_warn "Disk cleanup finished with errors" || log_ok "Disk cleanup completed"
+    df -h -x tmpfs -x devtmpfs -x squashfs -x overlay
+    return "$rc"
 }
 alias clean-up-disk='clean_up_disk'
 alias cud='clean_up_disk'
@@ -280,8 +287,8 @@ _disk_grow_plan() {
     local grows_fs=0
     if [[ "${types[0]}" == lvm ]]; then
         local pv="${names[1]}" lv dev_size pv_size vg_free pv_gap
-        read -r dev_size pv_size vg_free < <(sudo pvs --noheadings --units b --nosuffix -o dev_size,pv_size,vg_free "$pv")
-        read -r lv < <(sudo lvs --noheadings -o lv_path "$src")
+        read -r dev_size pv_size vg_free < <($SUDO pvs --noheadings --units b --nosuffix -o dev_size,pv_size,vg_free "$pv")
+        read -r lv < <($SUDO lvs --noheadings -o lv_path "$src")
         pv_gap=$(( dev_size - pv_size ))
         (( pv_gap >= gib )) || pv_gap=0
         (( ${#steps[@]} || pv_gap )) && steps+=("pvresize ${pv}")
@@ -332,29 +339,28 @@ _disk_grow_plan() {
 # @returns 0 when every step ran; 1 when stopped, refused or failed
 _disk_grow_run() {
     local yes="$1"; shift
-    local step answer
+    local step
     local -a argv
     for step in "$@"; do
         read -ra argv <<< "$step"
         if [[ "${argv[0]}" == growpart ]]; then
             if ! command -v growpart &>/dev/null; then
-                case "$(_pkg_manager)" in
+                case "$PKG_MGR" in
                     apt) pkg_ensure -m apt -p cloud-guest-utils ;;
                     dnf) pkg_ensure -m dnf -p cloud-utils-growpart ;;
                 esac
                 command -v growpart &>/dev/null || { log_err "growpart is required -- nothing changed (or rerun with --parted)"; return 1; }
             fi
-            sudo growpart --dry-run "${argv[@]:1}" || { log_err "growpart dry run failed -- nothing changed"; return 1; }
+            $SUDO growpart --dry-run "${argv[@]:1}" || { log_err "growpart dry run failed -- nothing changed"; return 1; }
         elif [[ "${argv[0]}" == parted ]]; then
             log_info "parted has no dry run and asks its own questions: Yes if the partition is in use, Fix if offered"
         fi
         if (( yes )); then
             log_step "Running: sudo ${step}"
         else
-            read -rp "Run: sudo ${step} ? (y/N): " answer
-            [[ "${answer,,}" == y ]] || { log_warn "Stopped before: sudo ${step} -- disk_status shows where it stands"; return 1; }
+            confirm "Run: sudo ${step} ?" || { log_warn "Stopped before: sudo ${step} -- disk_status shows where it stands"; return 1; }
         fi
-        sudo "${argv[@]}" || { log_err "Failed: sudo ${step}"; return 1; }
+        $SUDO "${argv[@]}" || { log_err "Failed: sudo ${step}"; return 1; }
     done
 }
 
@@ -387,7 +393,7 @@ _disk_grow_run() {
 # @param -h|--help     Print usage and exit
 # @param $1 string  Optional mount point, always first (default: pick from a menu)
 # @param $2 string  Optional amount to add on LVM, e.g. 40G (default: all free space)
-# @depends _disk_grow_plan, _disk_grow_run, radioselect, sudo
+# @depends _disk_grow_plan, _disk_grow_run, radioselect, ask, confirm
 # @example disk_grow                  # menu
 # @example disk_grow /                # all free space to /
 # @example disk_grow / 40G            # 40G to /, the rest stays in the VG for later
@@ -426,7 +432,7 @@ disk_grow() {
     # virtio and NVMe report it on their own
     local disk
     while read -r disk; do
-        [[ -e "/sys/block/${disk}/device/rescan" ]] && echo 1 | sudo tee "/sys/block/${disk}/device/rescan" >/dev/null
+        [[ -e "/sys/block/${disk}/device/rescan" ]] && echo 1 | $SUDO tee "/sys/block/${disk}/device/rescan" >/dev/null
     done < <(lsblk -dno NAME,TYPE | awk '$2 == "disk" {print $1}')
 
     local plan
@@ -447,7 +453,7 @@ disk_grow() {
                mp=${mps[$pick]} ;;
         esac
         if [[ "$(_disk_grow_plan "$mp")" == *lvextend* ]]; then
-            read -rp "Size to add to ${mp} (e.g. 40G) [all]: " size
+            ask size "Size to add to ${mp} (e.g. 40G, empty = all)" || return 1
         fi
         log_info "Same as: disk_grow ${opts}${mp}${size:+ ${size}}"
     fi
@@ -477,3 +483,163 @@ disk_grow() {
 }
 alias disk-grow='disk_grow'
 alias dg='disk_grow'
+# @name _chc_size / _chc_human / _chc_safe / _chc_foreign / _chc_add
+# @description Internal helpers of clean_home_caches. _chc_add appends to the caller's
+#              plan arrays (bash's dynamic scope: they are clean_home_caches' locals).
+_chc_size() { [[ -e "$1" ]] && du -sb "$1" 2>/dev/null | cut -f1 || echo 0; }
+_chc_human() {
+    local b="${1:-0}"
+    if   (( b >= 1073741824 )); then awk -v b="$b" 'BEGIN { printf "%.1fG", b / 1073741824 }'
+    elif (( b >= 1048576 ));    then awk -v b="$b" 'BEGIN { printf "%.0fM", b / 1048576 }'
+    elif (( b >= 1024 ));       then awk -v b="$b" 'BEGIN { printf "%.0fK", b / 1024 }'
+    else printf '%dB' "$b"
+    fi
+}
+# The last line of defence if a find expression ever goes wrong: only paths at least
+# two components below $HOME may be deleted, so ~ and ~/foo never qualify.
+_chc_safe() {
+    [[ "$1" == "$HOME"/* ]] || return 1
+    local rel="${1#"$HOME"/}"
+    [[ "$rel" == */* ]]
+}
+# A browser download built for another CPU (puppeteer/playwright guessing the platform
+# wrong): it can never run here. Any doubt answers no.
+_chc_foreign() {
+    local token bin desc
+    case "$(uname -m)" in
+        aarch64 | arm64) token="ARM aarch64" ;;
+        x86_64 | amd64)  token="x86-64" ;;
+        *)               return 1 ;;
+    esac
+    command -v file &>/dev/null || return 1
+    bin=$(find "$1" -type f -executable \( -name '*chrome*' -o -name '*firefox*' \) 2>/dev/null | head -1)
+    [[ -n "$bin" ]] || return 1
+    desc=$(file -b "$bin" 2>/dev/null)
+    [[ "$desc" == *ELF* && "$desc" != *"$token"* ]]
+}
+_chc_add() {
+    local path="$1" label="$2" mode="${3:-rm}" bytes existing
+    [[ -e "$path" ]] || return 0
+    [[ "$path" == "$root" || "$path" == "$root"/* ]] || return 0
+    # An incremental cache inside a target dir already planned would count twice
+    for existing in "${plan_paths[@]}"; do
+        [[ "$path" == "$existing" || "$path" == "$existing"/* ]] && return 0
+    done
+    _chc_safe "$path" || { log_warn "Skipping unsafe path: ${path}"; return 0; }
+    bytes=$(_chc_size "$path")
+    (( bytes > 0 )) || return 0
+    plan_paths+=("$path"); plan_labels+=("$label"); plan_bytes+=("$bytes"); plan_modes+=("$mode")
+}
+
+# @name clean_home_caches
+# @description Reclaim space in your home from caches that regenerate, in tiers -- each
+#              includes the ones above it:
+#                (default)  free       Rust incremental caches, browsers downloaded for
+#                                      the wrong CPU, interrupted-build leftovers
+#                -c         cheap      + npm / pnpm / yarn / typescript download caches
+#                                      (costs bandwidth on the next install)
+#                -d         expensive  + `cargo clean` of every Rust project found
+#                                      (the next build of each is from scratch)
+#              Shows the plan with sizes first, then lets you pick the entries to delete
+#              (multiselect); -y deletes all of them without asking. Source code, git
+#              state and installed packages are never touched, and nothing outside
+#              $HOME can be deleted. The system-level counterpart is clean_up_disk.
+# @param -c | --cache    flag    Include the cheap tier
+# @param -d | --deep     flag    Include the expensive tier
+# @param -r | --root     string  Only scan under this directory (default: $HOME)
+# @param -n | --dry-run  flag    Show the plan, delete nothing
+# @param -y | --yes      flag    Delete everything in the plan without asking
+# @example chc -n             # what the free tier would reclaim
+# @example chc -c             # free + cheap, pick what to delete
+# @example chc -d -r ~/src    # include cargo clean, only under ~/src
+clean_home_caches() {
+    local tier=free dry=0 yes=0 root="$HOME"
+    local usage="usage: clean_home_caches [-c|-d] [-r dir] [-n] [-y]"
+    while (( $# )); do
+        case "$1" in
+            -c | --cache)   [[ "$tier" == expensive ]] || tier=cheap ;;
+            -d | --deep)    tier=expensive ;;
+            -r | --root)    root="${2:-}"; shift ;;
+            -n | --dry-run) dry=1 ;;
+            -y | --yes)     yes=1 ;;
+            -h | --help)    echo "$usage"; return 0 ;;
+            *) log_err "Unknown option: $1 -- ${usage}"; return 1 ;;
+        esac
+        shift
+    done
+    [[ -d "$root" ]] || { log_err "No such directory: ${root}"; return 1; }
+    root=$(cd "$root" && pwd)
+
+    local -a plan_paths=() plan_labels=() plan_bytes=() plan_modes=()
+    local d before
+    before=$(df -P -B1 "$HOME" | awk 'NR == 2 {print $4}')
+    log_head "Home caches -- tier: ${tier}"
+    log_info "Free space now: $(_chc_human "$before"); scanning ${root}..."
+
+    # Widest scope first: a planned cargo clean covers the incremental caches inside it
+    if [[ "$tier" == expensive ]]; then
+        if command -v cargo &>/dev/null; then
+            while IFS= read -r -d '' d; do
+                [[ -f "$(dirname "$d")/Cargo.toml" ]] || continue
+                _chc_add "$d" "Rust build dir of $(basename "$(dirname "$d")") -- next build from scratch" cargo-clean
+            done < <(find "$root" -maxdepth 3 -mindepth 1 -name '.*' -prune -o -type d -name target -print0 2>/dev/null)
+        else
+            log_warn "cargo not found -- skipping the expensive tier"
+        fi
+    fi
+    if [[ "$tier" != free ]]; then
+        _chc_add "$HOME/.npm/_cacache"      "npm download cache"
+        _chc_add "$HOME/.cache/pnpm"        "pnpm metadata cache"
+        _chc_add "$HOME/.cache/yarn"        "yarn download cache"
+        _chc_add "$HOME/.cache/typescript"  "typescript version cache"
+    fi
+    while IFS= read -r -d '' d; do
+        _chc_add "$d" "Rust incremental cache"
+    done < <(find "$root" -maxdepth 5 -mindepth 1 -name '.*' -prune -o -type d -name incremental -path '*/target/*' -print0 2>/dev/null)
+    for d in "$HOME/.cache/puppeteer" "$HOME/.cache/ms-playwright"; do
+        [[ -d "$d" ]] && _chc_foreign "$d" && _chc_add "$d" "browser built for another CPU (cannot run here)"
+    done
+    while IFS= read -r -d '' d; do
+        _chc_add "$d" "interrupted build leftovers"
+    done < <(find "$root" -maxdepth 6 -mindepth 1 -name '.*' -prune -o \( -name '*.assembling' -o -name 'incremental-*.tmp' \) -print0 2>/dev/null)
+
+    (( ${#plan_paths[@]} )) || { log_ok "Nothing to reclaim at this tier"; return 0; }
+
+    local i total=0
+    local -a labels=()
+    for i in "${!plan_paths[@]}"; do
+        total=$(( total + plan_bytes[i] ))
+        labels+=("$(printf '%-7s %s  -- %s' "$(_chc_human "${plan_bytes[$i]}")" "${plan_paths[$i]/#"$HOME"/\~}" "${plan_labels[$i]}")")
+    done
+    printf '  %s\n' "${labels[@]}"
+    log_info "Reclaimable: $(_chc_human "$total")"
+    (( dry )) && { log_ok "Dry run -- nothing deleted"; return 0; }
+
+    local -a picks=()
+    if (( yes )); then
+        picks=("${!plan_paths[@]}")
+    else
+        ui_tty || { log_err "No terminal to pick from -- pass -y to delete everything listed"; return 1; }
+        local sel
+        multiselect sel "Delete which? (a = all)" "${labels[@]}" || { log_info "Cancelled -- nothing deleted"; return 0; }
+        read -ra picks <<< "$sel"
+        (( ${#picks[@]} )) || { log_info "Nothing selected"; return 0; }
+    fi
+
+    local freed=0 path
+    for i in "${picks[@]}"; do
+        path="${plan_paths[$i]}"
+        _chc_safe "$path" || { log_warn "Skipping unsafe path: ${path}"; continue; }
+        if [[ "${plan_modes[$i]}" == cargo-clean ]]; then
+            cargo clean --manifest-path "$(dirname "$path")/Cargo.toml" >/dev/null 2>&1 \
+                && freed=$(( freed + plan_bytes[i] )) || log_warn "cargo clean failed: ${path}"
+        elif rm -rf -- "$path"; then
+            freed=$(( freed + plan_bytes[i] ))
+        else
+            log_warn "Could not remove ${path}"
+        fi
+    done
+    log_ok "Reclaimed $(_chc_human "$freed"); free space $(_chc_human "$before") -> $(_chc_human "$(df -P -B1 "$HOME" | awk 'NR == 2 {print $4}')")"
+}
+alias clean-home-caches='clean_home_caches'
+alias chc='clean_home_caches'

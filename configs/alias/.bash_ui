@@ -1,0 +1,251 @@
+#!/usr/bin/env bash
+# @file .bash_ui
+# @brief Shared interactive layer: menus, confirmations and prompts.
+# @description
+#   Every question a command asks goes through here, so all of them behave the same:
+#   the same keys, the same y/N wording, the same answer to "there is no terminal".
+#     - radioselect : pick one item from a list      (index into an out-var)
+#     - multiselect : pick any number of items       (indices into an out-var)
+#     - confirm     : y/N question, honoring UI_ASSUME_YES (-y)
+#     - ask         : one line of free text
+#     - ui_tty      : is there someone to ask?
+#   Commands never hand-roll `read -p` menus or y/N prompts (tests/lint.sh checks).
+#
+#   The command convention these serve -- arguments first, menus as the fallback:
+#     1. Everything a command needs can be given as arguments or flags, so it works in
+#        scripts, cron and over ssh -c. `-h|--help` prints usage.
+#     2. Only when a required argument is missing AND ui_tty succeeds does the command
+#        open a radioselect/multiselect (or ask). With no terminal it fails with usage
+#        instead of waiting on input that will never come.
+#     3. Anything destructive asks confirm first; `-y|--yes` (or UI_ASSUME_YES=1)
+#        answers yes, `-n|--dry-run` shows what would happen and changes nothing.
+#     4. Option letters keep one meaning across modules -- see the table in
+#        .bash_aliases.
+#   Depends on .bash_env (STYLE, log_*).
+
+# @const UI_ASSUME_YES
+# @description When 1, confirm answers yes without asking. Commands set it locally from
+#              their own -y flag; the deploy framework sets it for `install.sh -y`.
+UI_ASSUME_YES="${UI_ASSUME_YES:-0}"
+
+# @name ui_tty
+# @description Succeed when there is a person to ask: stdin is a terminal. Menus read
+#              keys from stdin, so a pipe, cron or a heredoc means nobody can answer.
+# @example ui_tty || { log_err "usage: ..."; return 1; }
+ui_tty() { [[ -t 0 ]]; }
+
+# @name confirm
+# @description Ask a y/N question; succeed only on an explicit y. Answers yes at once
+#              under UI_ASSUME_YES=1. With no terminal it answers NO and says why --
+#              a destructive step must never run because nobody was there to refuse.
+# @param $1 string  Question, without the "(y/N)" suffix
+# @returns 0 yes; 1 no, cancelled, or no terminal
+# @example (( yes )) || confirm "Delete 3 branches?" || return 0
+# @example UI_ASSUME_YES=1 confirm "Proceed?"   # -> 0, no prompt
+confirm() {
+    local question="$1" answer
+    [[ "${UI_ASSUME_YES:-0}" == 1 ]] && return 0
+    if ! ui_tty; then
+        log_warn "No terminal to confirm '${question}' -- pass -y to answer yes"
+        return 1
+    fi
+    read -rp "${question} (y/N): " answer || return 1
+    [[ "${answer,,}" == y || "${answer,,}" == yes ]]
+}
+
+# @name ask
+# @description Read one line of free text into the caller's variable. An empty answer
+#              takes the default, if one is given.
+# @param $1 string  Name of the caller variable to receive the answer
+# @param $2 string  Prompt, without the trailing ": "
+# @param $3 string  Optional default, shown in brackets
+# @returns 0 with the answer set; 1 with no terminal or on end of input (var emptied)
+# @example ask size "Size to add (e.g. 40G)" all || return 1
+ask() {
+    local __ask_var="$1" __ask_prompt="$2" __ask_default="${3:-}" __ask_reply
+    printf -v "$__ask_var" '%s' ""
+    ui_tty || { log_err "No terminal to ask: ${__ask_prompt}"; return 1; }
+    read -rp "${__ask_prompt}${__ask_default:+ [${__ask_default}]}: " __ask_reply || return 1
+    printf -v "$__ask_var" '%s' "${__ask_reply:-$__ask_default}"
+}
+
+# @name multiselect
+# @description Interactive multi-select menu (pure bash): Up/Down or j/k to move,
+#              SPACE to toggle, a to toggle all, ENTER to confirm, q to cancel. Writes
+#              the SELECTED INDICES (space-separated, in menu order) into the caller's
+#              named variable, so labels may safely contain spaces. Uses the shared
+#              STYLE map (from .bash_env) for the reverse-video cursor and green check.
+#              Shared engine, consumed across modules -- e.g. .bash_pkg's sys_toolkit -m
+#              builds status labels, .bash_git's git_restore_deleted lists deleted files;
+#              both apply actions by the returned indices.
+#              Note the menu is rendered on one cleared screen with no paging, so
+#              callers should keep the option list short enough to fit.
+#              The key legend is printed by the engine -- callers must NOT repeat
+#              the keybindings in their title.
+# @param $1     string  Name of the caller variable to receive selected indices
+# @param $2     string  Title shown above the menu (may be empty "")
+# @param $3..   string  Option labels to display (plain text recommended)
+# @returns 0 on confirm (indices in the out-var); 1 on cancel or end of input
+#          (out-var emptied)
+# @example multiselect PICKS "Pick tools:" jq htop lnav
+# @example for i in $PICKS; do echo "chose index $i"; done
+multiselect() {
+    local result_var="$1" title="$2"; shift 2
+    local -a labels=("$@")
+    local -A picked=()
+    local cursor=0
+    local i key rest box
+
+    while true; do
+        clear
+        [[ -n "$title" ]] && log_step "$title"
+        # Keys are the engine's contract, so the engine documents them -- otherwise
+        # every caller has to remember to spell them out in its own title.
+        echo -e "${STYLE[dim]}  ↑/↓ or j/k move · SPACE toggle · a all · ENTER confirm · q cancel${STYLE[reset]}"
+        echo ""
+        for i in "${!labels[@]}"; do
+            if [[ "$i" -eq "$cursor" ]]; then
+                # Cursor row: plain box + reverse-video whole line (no inner resets).
+                box="[ ]"; [[ -n "${picked[$i]:-}" ]] && box="[✔]"
+                echo -e "  ${STYLE[reverse]}${box} ${labels[$i]}${STYLE[reset]}"
+            else
+                box="[ ]"; [[ -n "${picked[$i]:-}" ]] && box="[${STYLE[fg_green]}✔${STYLE[reset]}]"
+                echo -e "  ${box} ${labels[$i]}"
+            fi
+        done
+
+        # End of input cancels, else it would read as ENTER and confirm
+        IFS= read -rsn1 key || { clear; printf -v "$result_var" '%s' ""; return 1; }
+        if [[ "$key" == $'\e' ]]; then
+            read -rsn2 -t 1 rest   # -t guards against a lone ESC hanging the read
+            # O* is application cursor mode, which some SSH clients (e.g. PuTTY) send
+            case "$rest" in
+                '[A' | OA) (( cursor > 0 )) && (( cursor-- )) ;;
+                '[B' | OB) (( cursor < ${#labels[@]} - 1 )) && (( cursor++ )) ;;
+            esac
+            continue
+        fi
+        case "$key" in
+            k | K) (( cursor > 0 )) && (( cursor-- )) ;;
+            j | J) (( cursor < ${#labels[@]} - 1 )) && (( cursor++ )) ;;
+            ' ')
+                if [[ -n "${picked[$cursor]:-}" ]]; then unset "picked[$cursor]"; else picked[$cursor]=1; fi
+                ;;
+            a | A)
+                if [[ ${#picked[@]} -eq ${#labels[@]} ]]; then
+                    picked=()
+                else
+                    for i in "${!labels[@]}"; do picked[$i]=1; done
+                fi
+                ;;
+            q | Q) clear; printf -v "$result_var" '%s' ""; return 1 ;;
+            '') break ;;   # ENTER
+        esac
+    done
+    clear
+
+    # Collect selected indices in menu order.
+    local -a sel=()
+    for i in "${!labels[@]}"; do
+        [[ -n "${picked[$i]:-}" ]] && sel+=("$i")
+    done
+    printf -v "$result_var" '%s' "${sel[*]}"
+    return 0
+}
+alias multi-select='multiselect'
+
+# @name radioselect
+# @description Interactive single-select menu (pure bash): Up/Down or j/k to move,
+#              type a number to jump to it, ENTER to pick, q to cancel. Writes the
+#              SELECTED INDEX (0-based) into the caller's named variable -- the same
+#              contract as multiselect, so labels may safely contain spaces.
+#              Built to replace hand-rolled numbered menus:
+#                - Items are numbered and typed digits accumulate, so the old habit of
+#                  typing "12" then ENTER still lands on item 12.
+#                - Drawn on stderr and never clears the screen, redrawing in place: it
+#                  works inside $(...) (a wrapper can echo the pick to stdout, as
+#                  _pkg_search_select does) and leaves the caller's output above it
+#                  in view.
+#                - Lists taller than the terminal scroll, with a "-- n/total --" line.
+#                - End of input cancels instead of picking the highlighted default, so
+#                  a script without a terminal can never choose by accident.
+#              Labels are cut to the terminal width, because the redraw moves the cursor
+#              up one row per line and a wrapped label would shift every later redraw
+#              (CJK chars count 1 column but render 2, as in log_banner).
+#              Shared engine, consumed across modules -- .bash_disk's disk_grow, tz,
+#              .bash_git's branch pickers, .bash_pkg's _pkg_search_select.
+#              The key legend is printed by the engine -- callers must NOT repeat the
+#              keybindings in their title.
+# @param $1     string  Name of the caller variable to receive the selected index; must
+#                       not be one of the engine's own locals (cursor, key, labels, ...)
+# @param $2     string  Title shown above the menu (may be empty "" when the caller
+#                       prints its own header)
+# @param $3     int     Index highlighted at start, i.e. what a bare ENTER picks. -1
+#                       highlights nothing, so ENTER does nothing until a choice is
+#                       made -- use it for menus that act at once, where the old
+#                       numbered menus also ignored a bare ENTER
+# @param $4..   string  Option labels to display (plain text)
+# @returns 0 on pick (index in the out-var); 1 on cancel or end of input (out-var emptied)
+# @example radioselect PICK "Grow which mount point?" 0 "/" "/home"
+# @example radioselect PICK "Switch to which branch?" -1 "${branches[@]}"
+# @example echo "chose index ${PICK}"
+radioselect() {
+    local result_var="$1" title="$2" cursor="$3"; shift 3
+    local -a labels=("$@")
+    local n=${#labels[@]} cols lines num_w width rows height top=0 i key rest digits="" drawn=0
+    cols=${COLUMNS:-$(tput cols 2>/dev/null)}
+    lines=${LINES:-$(tput lines 2>/dev/null)}
+    num_w=${#n}
+    width=$(( ${cols:-80} - num_w - 8 ))   # "  (•) " + number + space, 1 so it never wraps
+    rows=$(( ${lines:-24} - 5 ))            # room for title, legend and the caller's next prompt
+    (( rows < 3 )) && rows=3
+    (( rows > n )) && rows=$n
+    height=$rows
+    (( n > rows )) && (( height++ ))        # the "-- n/total --" line
+
+    [[ -n "$title" ]] && printf '%s%s%s\n' "${STYLE[fg_yellow]}" "$title" "${STYLE[reset]}" >&2
+    printf '%s  ↑/↓ or j/k move · type a number to jump · ENTER pick · q cancel%s\n' \
+        "${STYLE[dim]}" "${STYLE[reset]}" >&2
+    while true; do
+        (( cursor >= 0 && cursor < top )) && top=$cursor
+        (( cursor >= top + rows )) && top=$(( cursor - rows + 1 ))
+        {
+            (( drawn )) && printf '\e[%dA' "$height"
+            for (( i = top; i < top + rows; i++ )); do
+                if (( i == cursor )); then
+                    printf '\e[2K  %s(•) %*d %s%s\n' "${STYLE[reverse]}" "$num_w" $(( i + 1 )) "${labels[$i]:0:width}" "${STYLE[reset]}"
+                else
+                    printf '\e[2K  ( ) %*d %s\n' "$num_w" $(( i + 1 )) "${labels[$i]:0:width}"
+                fi
+            done
+            (( n > rows )) && printf '\e[2K  %s-- %d/%d --%s\n' "${STYLE[dim]}" $(( cursor + 1 )) "$n" "${STYLE[reset]}"
+        } >&2
+        drawn=1
+
+        IFS= read -rsn1 key || { printf -v "$result_var" '%s' ""; return 1; }
+        if [[ "$key" == $'\e' ]]; then
+            read -rsn2 -t 1 rest   # -t guards against a lone ESC hanging the read
+            # O* is application cursor mode, which some SSH clients (e.g. PuTTY) send
+            case "$rest" in
+                '[A' | OA) (( cursor > 0 )) && (( cursor-- )) ;;
+                '[B' | OB) (( cursor < n - 1 )) && (( cursor++ )) ;;
+            esac
+            digits=""
+            continue
+        fi
+        case "$key" in
+            [0-9])
+                # 10# keeps a leading 0 from being read as octal
+                digits+=$key
+                (( 10#$digits >= 1 && 10#$digits <= n )) || digits=$key
+                (( 10#$digits >= 1 && 10#$digits <= n )) && cursor=$(( 10#$digits - 1 ))
+                ;;
+            k | K) (( cursor > 0 )) && (( cursor-- )); digits="" ;;
+            j | J) (( cursor < n - 1 )) && (( cursor++ )); digits="" ;;
+            q | Q) printf -v "$result_var" '%s' ""; return 1 ;;
+            '') (( cursor >= 0 )) && break ;;   # ENTER; ignored while nothing is highlighted
+        esac
+    done
+    printf -v "$result_var" '%s' "$cursor"
+}
+alias radio-select='radioselect'

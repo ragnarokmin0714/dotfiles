@@ -1,3 +1,6 @@
+#!/usr/bin/env bash
+# @file .bash_nginx
+# @brief Nginx: service control, config test + reload, logs, virtual hosts.
 # =========================
 # --- Nginx ---
 # =========================
@@ -5,15 +8,15 @@
 # Navigate to nginx config directory
 alias cdnginx='cd /etc/nginx'
 # Edit the main nginx configuration file
-alias nginx-conf='sudo vi /etc/nginx/nginx.conf'
+alias nginx-conf='$SUDO ${EDITOR:-vi} /etc/nginx/nginx.conf'
 # Test nginx configuration syntax
-alias nginx-test='sudo nginx -t'
+alias nginx-test='$SUDO nginx -t'
 # Reload nginx gracefully (no connection drop)
-alias nginx-reload='sudo systemctl reload nginx'
+alias nginx-reload='$SUDO systemctl reload nginx'
 # Full restart
-alias nginx-restart='sudo systemctl restart nginx'
-alias nginx-start='sudo systemctl start nginx'
-alias nginx-stop='sudo systemctl stop nginx'
+alias nginx-restart='$SUDO systemctl restart nginx'
+alias nginx-start='$SUDO systemctl start nginx'
+alias nginx-stop='$SUDO systemctl stop nginx'
 
 # @name nginx_status
 # @description Show nginx version, config test result, and systemd service status.
@@ -28,7 +31,7 @@ nginx_status() {
     echo ""
 
     log_step "Config test:"
-    if sudo nginx -t 2>&1; then
+    if $SUDO nginx -t 2>&1; then
         log_ok "Config OK"
     else
         log_err "Config has errors"
@@ -52,9 +55,9 @@ alias nginx-status='nginx_status'
 # @example ngtr
 nginx_test_reload() {
     log_warn "Testing nginx config..."
-    if sudo nginx -t 2>&1; then
+    if $SUDO nginx -t 2>&1; then
         log_warn "Reloading nginx..."
-        if sudo systemctl reload nginx; then
+        if $SUDO systemctl reload nginx; then
             log_ok "nginx reloaded successfully"
         else
             log_err "Reload failed"
@@ -84,9 +87,9 @@ nginx_log() {
 
     _ng_tail() {
         if [[ -n "$filter" ]]; then
-            sudo tail -f "$1" | grep --line-buffered "$filter"
+            $SUDO tail -f "$1" | grep --line-buffered "$filter"
         else
-            sudo tail -f "$1"
+            $SUDO tail -f "$1"
         fi
     }
 
@@ -95,9 +98,9 @@ nginx_log() {
         error)  _ng_tail "$error_log"  ;;
         both)
             if [[ -n "$filter" ]]; then
-                sudo tail -f "$access_log" "$error_log" | grep --line-buffered "$filter"
+                $SUDO tail -f "$access_log" "$error_log" | grep --line-buffered "$filter"
             else
-                sudo tail -f "$access_log" "$error_log"
+                $SUDO tail -f "$access_log" "$error_log"
             fi
             ;;
         *)
@@ -111,19 +114,14 @@ alias nginx-log='nginx_log'
 
 # @name nginx_vhost_list
 # @description List nginx virtual host configs.
-#              Auto-detects conf.d (RHEL/Rocky) or sites-enabled (Debian/Ubuntu).
+#              sites-enabled on Debian/Ubuntu, conf.d on the RHEL family.
 # @example nginx_vhost_list
 # @example ngvl
 nginx_vhost_list() {
-    local conf_dir
-    if [[ -d /etc/nginx/conf.d ]]; then
-        conf_dir="/etc/nginx/conf.d"
-    elif [[ -d /etc/nginx/sites-enabled ]]; then
-        conf_dir="/etc/nginx/sites-enabled"
-    else
-        log_err "No nginx config directory found"
-        return 1
-    fi
+    # Ubuntu ships an (empty) conf.d too, so pick by family, not by what exists
+    local conf_dir=/etc/nginx/conf.d
+    [[ "$OS_FAMILY" == debian ]] && conf_dir=/etc/nginx/sites-enabled
+    [[ -d "$conf_dir" ]] || { log_err "No nginx vhost directory: ${conf_dir}"; return 1; }
 
     log_head "Virtual Hosts: ${conf_dir}"
     echo ""

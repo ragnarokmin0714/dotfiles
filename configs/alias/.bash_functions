@@ -1,370 +1,292 @@
-############################################################
-# =========================
-# --- Shell Config ---
-# =========================
-
-# Reload bash configuration
-alias srcbash='source /etc/bashrc && source ~/.bashrc'
-# Navigate to alias profile directory
-alias cdaliases='cd /etc/profile.d/.alias'
-# Quickly change to uploads directory
-alias cduploads='cd /srv/www/bidsystem/uploads/'
-# Quickly change to construction_pmis directory
-alias cdpmis='cd /etc/moneytek/construction_pmis'
-# change directory to moneytek log directory
-alias cdlog='cd /var/log/moneytek'
-# change directory to local sbin directory
-alias cdsbin='cd /usr/local/sbin'
-
-# @name deploy_alias
-# @description Sync alias scripts from a working copy to ALIAS_DST_DIR, normalize
-#              perms to 644, and reload the current shell. Paths come from the
-#              ALIAS_SRC_DIR / ALIAS_DST_DIR constants (.bash_env), so a distro with a
-#              different layout only overrides those (e.g. ALIAS_DST_DIR=...).
-# @param $1 string Source dir (default: $ALIAS_SRC_DIR from .bash_env)
-# @example deploy_alias
-# @example deploy_alias /path/to/alias
-deploy_alias() {
-    local src="${1:-$ALIAS_SRC_DIR}"
-    local dst="$ALIAS_DST_DIR"
-
-    sudo mkdir -p "$dst" || { log_err "Failed to create ${dst}"; return 1; }
-    sudo install -m 644 "$src"/.bash_* "$dst"/ || {
-        log_err "Failed to deploy alias scripts from ${src} to ${dst}"
-        return 1
-    }
-    log_ok "Deployed .alias scripts: ${src} -> ${dst} (chmod 644)"
-    # shellcheck disable=SC1091
-    source "$dst/.bash_aliases" && log_ok "Reloaded current shell"
-}
-alias deploy-alias='deploy_alias'
-
-# @name ensure_alias_hook
-# @description Idempotently make the system-wide bashrc (ALIAS_HOOK_FILE) source
-#              ALIAS_DST_DIR/.bash_aliases, so a fresh host loads the alias system on
-#              next login. Safe to re-run: appends the line only if absent. The hook
-#              file differs by distro (/etc/bashrc vs /etc/bash.bashrc) and is resolved
-#              from /etc/os-release in .bash_env.
-# @example ensure_alias_hook && deploy_alias   # first-time setup on a new host
-ensure_alias_hook() {
-    local hook="$ALIAS_HOOK_FILE"
-    local marker="$ALIAS_DST_DIR/.bash_aliases"
-    local line="[ -f $marker ] && source $marker"
-    [ -n "$hook" ] || { log_err "ensure_alias_hook: ALIAS_HOOK_FILE is empty"; return 1; }
-    if [ -f "$hook" ] && grep -qF "$marker" "$hook"; then
-        log_info "alias hook already present in ${hook}"
-        return 0
-    fi
-    echo "$line" | sudo tee -a "$hook" >/dev/null || {
-        log_err "ensure_alias_hook: failed to write ${hook}"
-        return 1
-    }
-    log_ok "added alias hook to ${hook}"
-}
-alias ensure-alias-hook='ensure_alias_hook'
+#!/usr/bin/env bash
+# @file .bash_functions
+# @brief Everyday system helpers: shell, listing, services, time, files, memory,
+#        updates, and project dev servers.
+# @description
+#   Depends on .bash_env (globals, log_*) and .bash_ui (menus, confirm, ask).
+#   Package handling lives in .bash_pkg, disks in .bash_disk, git in .bash_git.
 
 # =========================
-# --- Pager ---
+# --- Shell ---
 # =========================
 
-# Enable ANSI color codes in less (prevents color escape sequences showing as raw text)
-alias less='less -R'
+HISTCONTROL=ignoreboth          # skip duplicates and lines starting with a space
+HISTSIZE=10000
+HISTFILESIZE=20000
+shopt -s histappend checkwinsize 2>/dev/null
 
-# =========================
-# --- System Utilities ---
-# =========================
+alias ls='ls --color=auto'
+alias grep='grep --color=auto'
+alias diff='diff --color=auto'
+alias less='less -R'            # pass ANSI colors through instead of showing escapes
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ll='ls -alF'
+alias la='ls -A'
 
-# List globally installed npm packages (depth 0) in JSON format
-alias npmlsg='npm list -g --depth=0 --json'
+# Jump to where the dotfiles live on this host
+alias cdaliases='cd "$ALIAS_DIR"'
+alias cdsbin='cd "$SBIN_DIR"'
+alias cddotfiles='cd "${DOTFILES_ROOT:-$HOME/dotfiles}"'
 
-# Show network connections and listening ports
-alias netstats='netstat -tulpn'
-alias sss='ss -tulpn'
-
-# long format, include hidden files, human-readable size
-alias lh='ls -lah'
-# long format, hidden, sort by access time
-alias lhu='lh -u'
-# long format, hidden, sort by change time (ctime)
-alias lhc='lh -c'
-# long format, hidden, sort by size largest first
-alias lhs='lh -S'
-# long format, hidden, sort by extension
-alias lhx='lh -X'
-# long format, hidden, sort by modified time oldest first
-alias lhtr='lh -tr'
-# long format, hidden, sort by modified time newest first
-alias lht='lh -t'
-
-# List all running services
-alias svc-running='systemctl list-units --type=service --state=running'
-# List all failed services
-alias svc-failed='systemctl list-units --type=service --state=failed'
-# List all services (including inactive)
-alias svc-all='systemctl list-units --type=service --all'
-# Count total services
-alias svc-count='systemctl list-units --type=service --all | grep -c .service'
-# Show service status (usage: svc-status nginx)
-alias svc-status='systemctl status'
-
-# current datetime in YYYY-MM-DD HH:MM:SS format (NOW_FMT shared with log_* in .bash_env)
-alias now='date "$NOW_FMT"'
-# current date in YYYY-MM-DD format
-alias today='date +"%Y-%m-%d"'
-# current time in HH:MM:SS format
-alias time-now='date +"%H:%M:%S"'
-
-## Enable NTP and restart time sync service
-#alias ntp-sync='sudo chronyc makestep && sudo hwclock --systohc && chronyc tracking && timedatectl'
-
-# @name ntp_sync
-# @description Re-sync system time using the active NTP service.
-#              Auto-detects chronyd (Rocky Linux / RHEL) or
-#              systemd-timesyncd (Ubuntu / Debian).
-# @depends     systemctl, chronyc, timedatectl
-# @example     ntp_sync
-# @example     ntp-sync
-ntp_sync() {
-    if systemctl is-active --quiet chronyd; then
-        # ── Rocky Linux / RHEL-based ──────────────────────────────────────────
-        log_warn "Restarting chronyd..."
-        sudo systemctl restart chronyd || {
-            log_err "Failed to restart chronyd"
-            return 1
-        }
-        sleep 2
-        log_ok "chronyd restarted successfully"
-        echo ""
-        chronyc tracking
-        echo ""
-        timedatectl
-
-    elif systemctl is-active --quiet systemd-timesyncd; then
-        # ── Ubuntu / Debian-based ─────────────────────────────────────────────
-        log_warn "Restarting systemd-timesyncd..."
-        sudo systemctl restart systemd-timesyncd || {
-            log_err "Failed to restart systemd-timesyncd"
-            return 1
-        }
-        sleep 2
-        log_ok "systemd-timesyncd restarted successfully"
-        echo ""
-        timedatectl show
-        echo ""
-        timedatectl
-
-    else
-        log_err "No active NTP service found (chronyd / systemd-timesyncd)"
+# @name dotfiles
+# @description Run the dotfiles installer from the checkout this host was deployed
+#              from (DOTFILES_ROOT, written into the bashrc hook at deploy time), as
+#              root. Arguments pass straight through; none opens the module menu.
+# @param $@ string  install.sh arguments: modules, -n, -y, --list, -h
+# @example dotfiles              # module menu
+# @example dotfiles shell        # redeploy this library after editing the checkout
+# @example dotfiles -n --all     # what a full run would do, changing nothing
+dotfiles() {
+    local root="${DOTFILES_ROOT:-}"
+    if [[ -z "$root" || ! -f "$root/install.sh" ]]; then
+        log_err "DOTFILES_ROOT is unset or has no install.sh -- run install.sh from your checkout once"
         return 1
     fi
+    $SUDO bash "$root/install.sh" "$@"
 }
-alias ntp-sync='ntp_sync'
-
-# Show current time sync status
-alias ntp-status='timedatectl status && timedatectl timesync-status'
-# Fix NTP sync and verify result
-alias ntp-fix='sudo timedatectl set-ntp true && sudo systemctl restart systemd-timesyncd && sleep 3 && timedatectl status'
-
-
-# --- Timezone ---
-# @name tz
-# @description Interactive timezone manager.
-#              No args  → show current timezone + menu of common zones.
-#              With arg → set timezone directly (exact) or list fuzzy matches.
-# @param $1 string  Optional: exact timezone or partial keyword (e.g. "Asia/Taipei", "Asia")
-# @example tz
-# @example tz Asia/Taipei
-# @example tz Asia
-tz() {
-    local COMMON_TZ=(
-        "Asia/Taipei"
-        "Asia/Tokyo"
-        "Asia/Shanghai"
-        "Asia/Singapore"
-        "Asia/Seoul"
-        "UTC"
-        "Europe/London"
-        "Europe/Paris"
-        "America/New_York"
-        "America/Los_Angeles"
-    )
-
-    _tz_apply() {
-        sudo timedatectl set-timezone "$1"
-        log_ok "Timezone set to: $1"
-        timedatectl | grep -E "Local time|Time zone"
-    }
-
-    # ── With argument: exact or fuzzy ──────────────────────────────────────
-    if [[ -n "$1" ]]; then
-        if timedatectl list-timezones 2>/dev/null | grep -qx "$1"; then
-            _tz_apply "$1"
-            return 0
-        fi
-
-        local matches
-        matches=$(timedatectl list-timezones 2>/dev/null | grep -i "$1")
-
-        if [[ -z "$matches" ]]; then
-            log_err "No timezone found for: $1"
-            return 1
-        fi
-
-        local -a match_arr
-        local sel
-        mapfile -t match_arr <<< "$matches"
-        radioselect sel "Matching timezones:" -1 "${match_arr[@]}" || { log_info "Cancelled"; return 0; }
-        _tz_apply "${match_arr[$sel]}"
-        return 0
-    fi
-
-    # ── No argument: show current + common zones menu ──────────────────────
-    log_step "Current timezone:"
-    timedatectl | grep -E "Local time|Time zone"
-    echo ""
-    local sel
-    radioselect sel "Common timezones:" -1 "${COMMON_TZ[@]}" "Enter manually" || { log_info "Cancelled"; return 0; }
-
-    # The extra last option, right after COMMON_TZ
-    if (( sel == ${#COMMON_TZ[@]} )); then
-        printf "Timezone (e.g. Asia/Taipei): "
-        read -r manual
-        [[ -z "$manual" ]] && log_info "Cancelled" && return 0
-        if timedatectl list-timezones 2>/dev/null | grep -qx "$manual"; then
-            _tz_apply "$manual"
-        else
-            log_err "Invalid timezone: $manual"
-            return 1
-        fi
-    else
-        _tz_apply "${COMMON_TZ[$sel]}"
-    fi
-}
-alias tz='tz'
 
 # @name reload_shell
-# @description Reload the current shell by sourcing the system-wide bashrc.
-#              Auto-detects /etc/bashrc (Rocky/RHEL) or /etc/bash.bashrc (Ubuntu/Debian).
-# @example reload_shell
-# @example rl
+# @description Re-source the system bashrc (SYS_BASHRC), which reloads this library
+#              through the dotfiles hook.
+# @example rs
 reload_shell() {
-    if [[ -f /etc/bashrc ]]; then
-        # shellcheck disable=SC1091
-        source /etc/bashrc
-        log_ok "Reloaded /etc/bashrc"
-    elif [[ -f /etc/bash.bashrc ]]; then
-        # shellcheck disable=SC1091
-        source /etc/bash.bashrc
-        log_ok "Reloaded /etc/bash.bashrc"
+    if [[ -f "$SYS_BASHRC" ]]; then
+        # shellcheck disable=SC1090
+        source "$SYS_BASHRC" && log_ok "Reloaded ${SYS_BASHRC}"
     else
-        log_warn "No system bashrc found — try: source ~/.bashrc"
+        log_warn "${SYS_BASHRC} not found -- try: source ~/.bashrc"
+        return 1
     fi
 }
 alias reload-shell='reload_shell'
 alias rs='reload_shell'
 
+# =========================
+# --- Listing / network / services ---
+# =========================
+
+alias lh='ls -lah'
+alias lhu='lh -u'               # by access time
+alias lhc='lh -c'               # by change time
+alias lhs='lh -S'               # by size
+alias lhx='lh -X'               # by extension
+alias lht='lh -t'               # newest first
+alias lhtr='lh -tr'             # newest last
+
+alias netstats='netstat -tulpn'
+alias sss='ss -tulpn'
+
 # @name get_ip
-# @description Get primary IPv4 address for prompt display.
-#              Uses 'hostname -I' and awk to extract first IP.
-#              Silent if no IP is found.
+# @description Primary IPv4 address (first of hostname -I); empty when there is none.
 # @example get_ip
 get_ip() {
     hostname -I 2>/dev/null | awk '{print $1}'
 }
 alias get-ip='get_ip'
 
-# @name find_path
-# @description Find files or directories by name under a given path (mimics `fd` tool).
-#              Automatically splits a full path into pattern and search directory.
-#              $1 may hold several whitespace-separated patterns (spaces, tabs or
-#              newlines); they are OR'd together in a single find pass. Quote it,
-#              or the shell expands the globs before find ever sees them.
-# @param $1 string One or more whitespace-separated patterns, or a full path
-#                  (e.g. "*.log", "fileA* fileB*", "~/.claude/.claude.json")
-# @param $2 string Optional path to search in, default is current directory
-# @param $3 string Optional file type: f (file), d (directory), l (symlink)
-# @param $4 int    Optional max depth to search
-# @example find_path "myfile.txt"
-# @example find_path "myfileA myfileB fileC"
-# @example find_path "myfileA* myfileB* fileC*" /var/log
-# @example find_path "$(cat hashes.txt)"   # one pattern per line also works
-# @example find_path "*.log" /var/log
-# @example find_path "*.conf" /etc f
-# @example find_path "logs" . d
-# @example find_path "*.txt" . f 2
-# @example find_path ~/.claude/.claude.json
-find_path() {
-    local pattern="$1"
-    local path="${2:-.}"
-    local type="$3"
-    local depth="$4"
+alias svc-running='systemctl list-units --type=service --state=running'
+alias svc-failed='systemctl list-units --type=service --state=failed'
+alias svc-all='systemctl list-units --type=service --all'
+alias svc-count='systemctl list-units --type=service --all | grep -c .service'
+alias svc-status='systemctl status'
 
-    # ── Warn if pattern looks like it was glob-expanded ───────────────────────
+# =========================
+# --- Date / time ---
+# =========================
+
+alias now='date "$NOW_FMT"'
+alias today='date +"%Y-%m-%d"'
+alias time-now='date +"%H:%M:%S"'
+
+# @name _ntp_service
+# @description Internal: echo the active NTP daemon -- chronyd (RHEL family default)
+#              or systemd-timesyncd (Ubuntu default); return 1 when neither runs.
+_ntp_service() {
+    local svc
+    for svc in chronyd systemd-timesyncd; do
+        systemctl is-active --quiet "$svc" 2>/dev/null && { echo "$svc"; return 0; }
+    done
+    return 1
+}
+
+# @name ntp_sync
+# @description Re-sync the clock by restarting whichever NTP daemon is active, then
+#              show its tracking state. Non-interactive: safe from cron (ntp-sync.sh).
+# @example ntp-sync
+ntp_sync() {
+    local svc
+    svc=$(_ntp_service) || { log_err "No active NTP service found (chronyd / systemd-timesyncd)"; return 1; }
+    log_warn "Restarting ${svc}..."
+    $SUDO systemctl restart "$svc" || { log_err "Failed to restart ${svc}"; return 1; }
+    sleep 2
+    log_ok "${svc} restarted"
+    if [[ "$svc" == chronyd ]]; then chronyc tracking; else timedatectl timesync-status 2>/dev/null; fi
+    timedatectl status
+}
+alias ntp-sync='ntp_sync'
+
+# @name ntp_status
+# @description Clock and NTP state: timedatectl, plus the active daemon's own view.
+# @example ntp-status
+ntp_status() {
+    timedatectl status
+    echo ""
+    case "$(_ntp_service)" in
+        chronyd)           chronyc tracking ;;
+        systemd-timesyncd) timedatectl timesync-status ;;
+        *)                 log_warn "No active NTP service (chronyd / systemd-timesyncd)" ;;
+    esac
+}
+alias ntp-status='ntp_status'
+
+# @name ntp_fix
+# @description Turn NTP on (timedatectl set-ntp true), restart the active daemon and
+#              show the result. For a clock that drifted because NTP was off.
+# @example ntp-fix
+ntp_fix() {
+    $SUDO timedatectl set-ntp true || { log_err "timedatectl set-ntp true failed"; return 1; }
+    local svc
+    svc=$(_ntp_service) || { log_err "NTP enabled, but no NTP daemon is running"; return 1; }
+    $SUDO systemctl restart "$svc" && sleep 3
+    timedatectl status
+}
+alias ntp-fix='ntp_fix'
+
+# @name tz
+# @description Show or set the timezone. An exact zone is set at once; a partial one
+#              opens a menu of matches; none opens a menu of common zones (plus
+#              manual entry). -l lists every zone matching the argument and stops.
+# @param -l | --list  flag    List matching zones only, change nothing
+# @param $1           string  Optional exact zone or keyword (Asia/Taipei, Asia, tokyo)
+# @example tz                 # menu of common zones
+# @example tz Asia/Taipei     # set directly
+# @example tz tokyo           # menu of matches
+# @example tz -l europe       # list only
+tz() {
+    local list=0 query="" usage="usage: tz [-l] [zone-or-keyword]"
+    while (( $# )); do
+        case "$1" in
+            -l | --list) list=1 ;;
+            -h | --help) echo "$usage"; return 0 ;;
+            -*) log_err "Unknown option: $1 -- ${usage}"; return 1 ;;
+            *)  query="$1" ;;
+        esac
+        shift
+    done
+    local -a zones=() common=(
+        Asia/Taipei Asia/Tokyo Asia/Shanghai Asia/Singapore Asia/Seoul UTC
+        Europe/London Europe/Paris America/New_York America/Los_Angeles
+    )
+    mapfile -t zones < <(timedatectl list-timezones 2>/dev/null)
+
+    if (( list )); then
+        printf '%s\n' "${zones[@]}" | grep -i -- "${query:-.}"
+        return 0
+    fi
+
+    local pick zone=""
+    if [[ -n "$query" ]]; then
+        if printf '%s\n' "${zones[@]}" | grep -qx -- "$query"; then
+            zone="$query"
+        else
+            local -a matches
+            mapfile -t matches < <(printf '%s\n' "${zones[@]}" | grep -i -- "$query")
+            (( ${#matches[@]} )) || { log_err "No timezone matches: ${query}"; return 1; }
+            ui_tty || { printf '%s\n' "${matches[@]}"; log_err "Several zones match -- give one exactly"; return 1; }
+            radioselect pick "Zones matching '${query}':" -1 "${matches[@]}" || { log_info "Cancelled"; return 0; }
+            zone="${matches[$pick]}"
+        fi
+    else
+        log_step "Current timezone:"
+        timedatectl | grep -E "Local time|Time zone"
+        ui_tty || return 0
+        echo ""
+        radioselect pick "Set timezone:" -1 "${common[@]}" "Enter manually..." || { log_info "Cancelled"; return 0; }
+        if (( pick == ${#common[@]} )); then
+            ask zone "Timezone (e.g. Asia/Taipei)" || return 1
+            [[ -n "$zone" ]] || { log_info "Cancelled"; return 0; }
+            printf '%s\n' "${zones[@]}" | grep -qx -- "$zone" || { log_err "Unknown timezone: ${zone}"; return 1; }
+        else
+            zone="${common[$pick]}"
+        fi
+    fi
+
+    $SUDO timedatectl set-timezone "$zone" || { log_err "Failed to set ${zone}"; return 1; }
+    log_ok "Timezone set to: ${zone}"
+    timedatectl | grep -E "Local time|Time zone"
+}
+
+# =========================
+# --- Files ---
+# =========================
+
+# @name find_path
+# @description Find files or directories by name (like fd). $1 may hold several
+#              whitespace-separated patterns (spaces, tabs or newlines), OR'd in one
+#              find pass -- quote it, or the shell expands the globs first. A single
+#              pattern containing / is split into directory + name.
+# @param $1 string One or more patterns, or a full path ("*.log", "a* b*", ~/x/y.json)
+# @param $2 string Optional directory to search (default: .)
+# @param $3 string Optional type: f (file), d (directory), l (symlink)
+# @param $4 int    Optional max depth
+# @example fp "*.log" /var/log
+# @example fp "fileA* fileB*" . f 2
+# @example fp ~/.claude/.claude.json
+find_path() {
+    local pattern="${1:-}" path="${2:-.}" type="${3:-}" depth="${4:-}"
+
     if [[ $# -gt 1 && "$2" != /* && "$2" != "." && "$2" != ".." && ! "$2" =~ ^[fdle]$ ]]; then
         log_warn "Use quotes to prevent glob expansion: fp \"${pattern}-*\""
     fi
 
-    # ── Split into patterns ───────────────────────────────────────────────────
-    # read -a splits on IFS without globbing (unlike patterns=($pattern), which
-    # would expand `file*` against the cwd). -d '' reads to EOF instead of
-    # stopping at the first newline, so a multi-line pattern list works too;
-    # it returns 1 at EOF, hence the `|| true`.
+    # read -a splits on IFS without globbing; -d '' reads to EOF so a multi-line
+    # pattern list works too (it returns 1 at EOF, hence || true).
     local -a patterns
     read -r -d '' -a patterns <<< "$pattern" || true
-
     if [[ ${#patterns[@]} -eq 0 ]]; then
-        log_err "Usage: find_path \"<pattern> [pattern...]\" [path] [type] [depth]"
+        log_err "usage: find_path \"<pattern> [pattern...]\" [path] [type] [depth]"
         return 1
     fi
 
-    # ── Auto-split full path into pattern + directory (single pattern only) ───
     if [[ ${#patterns[@]} -eq 1 && "${patterns[0]}" == */* ]]; then
         path=$(dirname "${patterns[0]}")
         patterns[0]=$(basename "${patterns[0]}")
     fi
 
-    # ── OR the patterns together: \( -name p1 -o -name p2 ... \) ──────────────
-    local -a name_expr=()
+    local -a name_expr=() args=()
     local p
     for p in "${patterns[@]}"; do
         [[ ${#name_expr[@]} -gt 0 ]] && name_expr+=(-o)
         name_expr+=(-name "$p")
     done
-
-    # -maxdepth is an option, so it must precede any test in the expression
-    local args=()
+    # -maxdepth is an option, so it must precede any test
     [[ -n "$depth" ]] && args+=(-maxdepth "$depth")
     [[ -n "$type" ]]  && args+=(-type "$type")
 
     local results
-    results=$(find "$path" "${args[@]}" \( "${name_expr[@]}" \))
-
+    results=$(find "$path" "${args[@]}" \( "${name_expr[@]}" \) 2>/dev/null)
     if [[ -z "$results" ]]; then
         log_err "No matches found for: ${patterns[*]}"
         return 1
     fi
-
     log_ok "Found the following matches:"
     echo -e "${STYLE[fg_bright_green]}${results}${STYLE[reset]}"
 
-    # ── Call out patterns that contributed nothing (partial hit) ─────────────
-    # Classify the single find pass instead of re-running find per pattern:
-    # $p stays unquoted so it is matched as a glob against each basename,
-    # the same way find -name does.
+    # Patterns that contributed nothing: classify the one find pass rather than
+    # re-running find per pattern ($p unquoted = glob match, as find -name does).
     if [[ ${#patterns[@]} -gt 1 ]]; then
         local -a missing=()
         local line hit
         for p in "${patterns[@]}"; do
             hit=""
             while IFS= read -r line; do
-                # shellcheck disable=SC2053  # unquoted $p is the point: glob match
+                # shellcheck disable=SC2053
                 [[ "${line##*/}" == $p ]] && { hit=1; break; }
             done <<< "$results"
             [[ -z "$hit" ]] && missing+=("$p")
         done
-        if [[ ${#missing[@]} -gt 0 ]]; then
-            log_warn "No matches for: ${missing[*]}"
-        fi
+        (( ${#missing[@]} )) && log_warn "No matches for: ${missing[*]}"
     fi
     return 0
 }
@@ -372,366 +294,203 @@ alias find-path='find_path'
 alias fp='find_path'
 
 # =========================
-# --- Memory Utilities ---
+# --- Memory ---
 # =========================
 
 # @name free_mem
-# @description Reclaim RAM by flushing dirty pages and dropping kernel caches
-#              (pagecache, dentries, inodes). Standard kernel feature, so it
-#              works on Rocky Linux 9+ and Ubuntu 20+ without package detection.
-#              Prints memory usage before and after, plus how much was reclaimed.
-#              Note: cached memory is not wasted — the kernel reuses it on demand.
-#              Forcing a drop can briefly slow I/O until caches warm up again.
-# @depends sudo, sync, free, awk
-# @example free_mem
+# @description Flush dirty pages and drop the kernel's page/dentry/inode caches, then
+#              report what was reclaimed. Cached memory is not wasted -- the kernel
+#              reuses it on demand -- and a forced drop briefly slows I/O while the
+#              caches warm up again. Standard kernel interface, any distro.
 # @example fm
 free_mem() {
-    # ── Capture available memory (MB) before the drop ─────────────────────────
-    local before
+    local before after
     before=$(free -m | awk '/^Mem:/ {print $7}')
-
     log_step "Memory before release:"
     free -h
-
-    # ── Flush dirty pages, then drop caches (level 3) ─────────────────────────
     log_warn "Syncing and dropping caches..."
     sync
-    if ! echo 3 | sudo tee /proc/sys/vm/drop_caches >/dev/null; then
-        log_err "Failed to drop caches (root privileges required)"
-        return 1
-    fi
-
-    # ── Capture available memory (MB) after the drop ──────────────────────────
-    local after
+    echo 3 | $SUDO tee /proc/sys/vm/drop_caches >/dev/null || { log_err "Failed to drop caches (needs root)"; return 1; }
     after=$(free -m | awk '/^Mem:/ {print $7}')
-
     echo ""
     log_step "Memory after release:"
     free -h
-
-    # ── Report the difference in available memory ─────────────────────────────
     echo ""
     log_ok "Reclaimed $(( after - before )) MB (available: ${before} MB -> ${after} MB)"
 }
 alias free-mem='free_mem'
 alias fm='free_mem'
 
-# @name _pkg_manager
-# @description Internal: echo the system package manager to stdout -- apt if present,
-#              else dnf; return 1 (nothing echoed) if neither is found. Shared auto-
-#              detection for sys_update / sys_toolkit. Distinct from PKG_DEFAULT_MANAGER,
-#              the static default used by pkg_* when -m is omitted.
-#              (The pkg_* family and sys_toolkit that also consume this live in
-#              .bash_pkg, sourced after this file.)
-# @returns 0 with manager name on stdout; 1 if no supported manager
-_pkg_manager() {
-    if command -v apt &>/dev/null; then
-        echo apt
-    elif command -v dnf &>/dev/null; then
-        echo dnf
-    else
-        return 1
-    fi
-}
+# =========================
+# --- System updates ---
+# =========================
 
 # @name sys_update
-# @description Update and upgrade system packages (supports apt and dnf).
-# @depends _pkg_manager
-# @example sys_update
+# @description Refresh the package index and upgrade every package (PKG_MGR). Without
+#              -y the package manager asks its own question; with -y nothing asks --
+#              on apt that includes keeping the current version of a changed config
+#              file, which is what an unattended cron run needs (an interactive dpkg
+#              conffile prompt would hang it).
+# @param -y | --yes      flag  Fully non-interactive
+# @param -n | --dry-run  flag  Print the commands, run nothing
+# @example sup           # asks before upgrading
+# @example sup -y        # unattended (sys-maint.sh)
 sys_update() {
-    local mgr
-    mgr=$(_pkg_manager) || { log_err "No supported package manager found (apt/dnf)"; return 1; }
-    case "$mgr" in
+    local yes=0 dry=0 usage="usage: sys_update [-y] [-n]"
+    while (( $# )); do
+        case "$1" in
+            -y | --yes)     yes=1 ;;
+            -n | --dry-run) dry=1 ;;
+            -h | --help)    echo "$usage"; return 0 ;;
+            *) log_err "Unknown option: $1 -- ${usage}"; return 1 ;;
+        esac
+        shift
+    done
+
+    local -a refresh upgrade
+    case "$PKG_MGR" in
         apt)
-            log_info "Updating via apt..."
-            sudo apt update -y && sudo apt upgrade -y
+            refresh=(apt-get update)
+            upgrade=(apt-get upgrade)
+            (( yes )) && upgrade=(env DEBIAN_FRONTEND=noninteractive apt-get -y
+                -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade)
             ;;
         dnf)
-            log_info "Updating via dnf..."
-            sudo dnf update -y
+            refresh=(dnf makecache)
+            upgrade=(dnf upgrade)
+            (( yes )) && upgrade=(dnf -y upgrade)
             ;;
+        *) log_err "No supported package manager (OS family: ${OS_FAMILY})"; return 1 ;;
     esac
+
+    if (( dry )); then
+        log_info "Dry run -- would run:"
+        printf '  %s\n' "${SUDO:+$SUDO }${refresh[*]}" "${SUDO:+$SUDO }${upgrade[*]}"
+        return 0
+    fi
+    log_info "Updating via ${PKG_MGR}..."
+    $SUDO "${refresh[@]}" && $SUDO "${upgrade[@]}"
 }
 alias sys-update='sys_update'
 alias sup='sys_update'
 
 # @name sys_maintain
-# @description Update system packages and clean up disk.
-# @depends sys_update, clean_up_disk (.bash_disk)
-# @example sys_maintain
+# @description sys_update, then clean_up_disk (.bash_disk), with the same flags.
+#              /usr/local/sbin/sys-maint.sh runs `sys_maintain -y` from cron daily.
+# @param -y | --yes      flag  Fully non-interactive
+# @param -n | --dry-run  flag  Show what would run, change nothing
+# @example sys-maint -n
 sys_maintain() {
-    sys_update && clean_up_disk
+    sys_update "$@" && clean_up_disk "$@"
 }
 alias sys-maint='sys_maintain'
 
 # =========================
-# --- UI Helpers ---
-# =========================
-
-# @name multiselect
-# @description Interactive multi-select menu (pure bash): Up/Down or j/k to move,
-#              SPACE to toggle, a to toggle all, ENTER to confirm, q to cancel. Writes
-#              the SELECTED INDICES (space-separated, in menu order) into the caller's
-#              named variable, so labels may safely contain spaces. Uses the shared
-#              STYLE map (from .bash_env) for the reverse-video cursor and green check.
-#              Shared engine, consumed across modules -- e.g. .bash_pkg's sys_toolkit -m
-#              builds status labels, .bash_git's git_restore_deleted lists deleted files;
-#              both apply actions by the returned indices.
-#              Note the menu is rendered on one cleared screen with no paging, so
-#              callers should keep the option list short enough to fit.
-#              The key legend is printed by the engine -- callers must NOT repeat
-#              the keybindings in their title.
-# @param $1     string  Name of the caller variable to receive selected indices
-# @param $2     string  Title shown above the menu (may be empty "")
-# @param $3..   string  Option labels to display (plain text recommended)
-# @returns 0 on confirm (indices in the out-var); 1 on cancel or end of input
-#          (out-var emptied)
-# @example multiselect PICKS "Pick tools:" jq htop lnav
-# @example for i in $PICKS; do echo "chose index $i"; done
-multiselect() {
-    local result_var="$1" title="$2"; shift 2
-    local -a labels=("$@")
-    local -A picked=()
-    local cursor=0
-    local i key rest box
-
-    while true; do
-        clear
-        [[ -n "$title" ]] && log_step "$title"
-        # Keys are the engine's contract, so the engine documents them -- otherwise
-        # every caller has to remember to spell them out in its own title.
-        echo -e "${STYLE[dim]}  ↑/↓ or j/k move · SPACE toggle · a all · ENTER confirm · q cancel${STYLE[reset]}"
-        echo ""
-        for i in "${!labels[@]}"; do
-            if [[ "$i" -eq "$cursor" ]]; then
-                # Cursor row: plain box + reverse-video whole line (no inner resets).
-                box="[ ]"; [[ -n "${picked[$i]:-}" ]] && box="[✔]"
-                echo -e "  ${STYLE[reverse]}${box} ${labels[$i]}${STYLE[reset]}"
-            else
-                box="[ ]"; [[ -n "${picked[$i]:-}" ]] && box="[${STYLE[fg_green]}✔${STYLE[reset]}]"
-                echo -e "  ${box} ${labels[$i]}"
-            fi
-        done
-
-        # End of input cancels, else it would read as ENTER and confirm
-        IFS= read -rsn1 key || { clear; printf -v "$result_var" '%s' ""; return 1; }
-        if [[ "$key" == $'\e' ]]; then
-            read -rsn2 -t 1 rest   # -t guards against a lone ESC hanging the read
-            # O* is application cursor mode, which some SSH clients (e.g. PuTTY) send
-            case "$rest" in
-                '[A' | OA) (( cursor > 0 )) && (( cursor-- )) ;;
-                '[B' | OB) (( cursor < ${#labels[@]} - 1 )) && (( cursor++ )) ;;
-            esac
-            continue
-        fi
-        case "$key" in
-            k | K) (( cursor > 0 )) && (( cursor-- )) ;;
-            j | J) (( cursor < ${#labels[@]} - 1 )) && (( cursor++ )) ;;
-            ' ')
-                if [[ -n "${picked[$cursor]:-}" ]]; then unset "picked[$cursor]"; else picked[$cursor]=1; fi
-                ;;
-            a | A)
-                if [[ ${#picked[@]} -eq ${#labels[@]} ]]; then
-                    picked=()
-                else
-                    for i in "${!labels[@]}"; do picked[$i]=1; done
-                fi
-                ;;
-            q | Q) clear; printf -v "$result_var" '%s' ""; return 1 ;;
-            '') break ;;   # ENTER
-        esac
-    done
-    clear
-
-    # Collect selected indices in menu order.
-    local -a sel=()
-    for i in "${!labels[@]}"; do
-        [[ -n "${picked[$i]:-}" ]] && sel+=("$i")
-    done
-    printf -v "$result_var" '%s' "${sel[*]}"
-    return 0
-}
-alias multi-select='multiselect'
-
-# @name radioselect
-# @description Interactive single-select menu (pure bash): Up/Down or j/k to move,
-#              type a number to jump to it, ENTER to pick, q to cancel. Writes the
-#              SELECTED INDEX (0-based) into the caller's named variable -- the same
-#              contract as multiselect, so labels may safely contain spaces.
-#              Built to replace hand-rolled numbered menus:
-#                - Items are numbered and typed digits accumulate, so the old habit of
-#                  typing "12" then ENTER still lands on item 12.
-#                - Drawn on stderr and never clears the screen, redrawing in place: it
-#                  works inside $(...) (a wrapper can echo the pick to stdout, as
-#                  _pkg_search_select does) and leaves the caller's output above it
-#                  in view.
-#                - Lists taller than the terminal scroll, with a "-- n/total --" line.
-#                - End of input cancels instead of picking the highlighted default, so
-#                  a script without a terminal can never choose by accident.
-#              Labels are cut to the terminal width, because the redraw moves the cursor
-#              up one row per line and a wrapped label would shift every later redraw
-#              (CJK chars count 1 column but render 2, as in log_banner).
-#              Shared engine, consumed across modules -- .bash_disk's disk_grow, tz,
-#              .bash_git's branch pickers, .bash_pkg's _pkg_search_select.
-#              The key legend is printed by the engine -- callers must NOT repeat the
-#              keybindings in their title.
-# @param $1     string  Name of the caller variable to receive the selected index; must
-#                       not be one of the engine's own locals (cursor, key, labels, ...)
-# @param $2     string  Title shown above the menu (may be empty "" when the caller
-#                       prints its own header)
-# @param $3     int     Index highlighted at start, i.e. what a bare ENTER picks. -1
-#                       highlights nothing, so ENTER does nothing until a choice is
-#                       made -- use it for menus that act at once, where the old
-#                       numbered menus also ignored a bare ENTER
-# @param $4..   string  Option labels to display (plain text)
-# @returns 0 on pick (index in the out-var); 1 on cancel or end of input (out-var emptied)
-# @example radioselect PICK "Grow which mount point?" 0 "/" "/home"
-# @example radioselect PICK "Switch to which branch?" -1 "${branches[@]}"
-# @example echo "chose index ${PICK}"
-radioselect() {
-    local result_var="$1" title="$2" cursor="$3"; shift 3
-    local -a labels=("$@")
-    local n=${#labels[@]} cols lines num_w width rows height top=0 i key rest digits="" drawn=0
-    cols=${COLUMNS:-$(tput cols 2>/dev/null)}
-    lines=${LINES:-$(tput lines 2>/dev/null)}
-    num_w=${#n}
-    width=$(( ${cols:-80} - num_w - 8 ))   # "  (•) " + number + space, 1 so it never wraps
-    rows=$(( ${lines:-24} - 5 ))            # room for title, legend and the caller's next prompt
-    (( rows < 3 )) && rows=3
-    (( rows > n )) && rows=$n
-    height=$rows
-    (( n > rows )) && (( height++ ))        # the "-- n/total --" line
-
-    [[ -n "$title" ]] && printf '%s%s%s\n' "${STYLE[fg_yellow]}" "$title" "${STYLE[reset]}" >&2
-    printf '%s  ↑/↓ or j/k move · type a number to jump · ENTER pick · q cancel%s\n' \
-        "${STYLE[dim]}" "${STYLE[reset]}" >&2
-    while true; do
-        (( cursor >= 0 && cursor < top )) && top=$cursor
-        (( cursor >= top + rows )) && top=$(( cursor - rows + 1 ))
-        {
-            (( drawn )) && printf '\e[%dA' "$height"
-            for (( i = top; i < top + rows; i++ )); do
-                if (( i == cursor )); then
-                    printf '\e[2K  %s(•) %*d %s%s\n' "${STYLE[reverse]}" "$num_w" $(( i + 1 )) "${labels[$i]:0:width}" "${STYLE[reset]}"
-                else
-                    printf '\e[2K  ( ) %*d %s\n' "$num_w" $(( i + 1 )) "${labels[$i]:0:width}"
-                fi
-            done
-            (( n > rows )) && printf '\e[2K  %s-- %d/%d --%s\n' "${STYLE[dim]}" $(( cursor + 1 )) "$n" "${STYLE[reset]}"
-        } >&2
-        drawn=1
-
-        IFS= read -rsn1 key || { printf -v "$result_var" '%s' ""; return 1; }
-        if [[ "$key" == $'\e' ]]; then
-            read -rsn2 -t 1 rest   # -t guards against a lone ESC hanging the read
-            # O* is application cursor mode, which some SSH clients (e.g. PuTTY) send
-            case "$rest" in
-                '[A' | OA) (( cursor > 0 )) && (( cursor-- )) ;;
-                '[B' | OB) (( cursor < n - 1 )) && (( cursor++ )) ;;
-            esac
-            digits=""
-            continue
-        fi
-        case "$key" in
-            [0-9])
-                # 10# keeps a leading 0 from being read as octal
-                digits+=$key
-                (( 10#$digits >= 1 && 10#$digits <= n )) || digits=$key
-                (( 10#$digits >= 1 && 10#$digits <= n )) && cursor=$(( 10#$digits - 1 ))
-                ;;
-            k | K) (( cursor > 0 )) && (( cursor-- )); digits="" ;;
-            j | J) (( cursor < n - 1 )) && (( cursor++ )); digits="" ;;
-            q | Q) printf -v "$result_var" '%s' ""; return 1 ;;
-            '') (( cursor >= 0 )) && break ;;   # ENTER; ignored while nothing is highlighted
-        esac
-    done
-    printf -v "$result_var" '%s' "$cursor"
-}
-alias radio-select='radioselect'
-
-# =========================
-# --- Project Commands ---
+# --- Project dev servers ---
 # =========================
 
 # @name run_project
-# @description Run a pnpm script inside a specific project directory.
-#              Avoid repetitive cd + pnpm commands, validate input,
-#              and improve developer experience.
-# @param $1 string Project directory name under ~/projects, default: "project"
-# @param $2 string pnpm script name defined in package.json, default: "dev"
-# @example run_project
-# @example run_project dev <myproject>
-# @example run_project start:prod <myproject>
+# @description Run a package.json script with pnpm in a project directory, from
+#              anywhere. Directory: -d, else the second argument, else
+#              RUN_PROJECT_DIR (set it in .bash_local), else the current directory.
+#              With no script given, pick one from the project's package.json.
+# @param -d | --dir  string  Project directory
+# @param $1          string  pnpm script name (default: pick from a menu)
+# @param $2          string  Project directory (same as -d)
+# @example run_project dev
+# @example run_project start:prod /srv/app
+# @example run-prj            # menu of the project's scripts
 run_project() {
-    # Set default values if parameters are missing
-    local script="${1:-dev}"
-    local project="${2:-/etc/moneytek/construction_pmis}"
+    local script="" dir="" usage="usage: run_project [-d dir] [script] [dir]"
+    while (( $# )); do
+        case "$1" in
+            -d | --dir)  dir="${2:-}"; shift ;;
+            -h | --help) echo "$usage"; return 0 ;;
+            -*) log_err "Unknown option: $1 -- ${usage}"; return 1 ;;
+            *)  if [[ -z "$script" ]]; then script="$1"; else dir="$1"; fi ;;
+        esac
+        shift
+    done
+    dir="${dir:-${RUN_PROJECT_DIR:-$PWD}}"
+    [[ -f "$dir/package.json" ]] || { log_err "No package.json in ${dir} -- pass -d <dir> or set RUN_PROJECT_DIR"; return 1; }
 
-#    if [ -z "$1" ] || [ -z "$2" ]; then
-#        echo "Usage: run_project <project> <pnpm-script>"
-#        return 1
-#    fi
+    if [[ -z "$script" ]]; then
+        ui_tty || { log_err "$usage"; return 1; }
+        command -v jq &>/dev/null || { log_err "Need a script name (or jq, to list them): ${usage}"; return 1; }
+        local -a scripts
+        local pick
+        mapfile -t scripts < <(jq -r '.scripts // {} | keys[]' "$dir/package.json")
+        (( ${#scripts[@]} )) || { log_err "No scripts in ${dir}/package.json"; return 1; }
+        radioselect pick "Run which script in ${dir}?" -1 "${scripts[@]}" || { log_info "Cancelled"; return 0; }
+        script="${scripts[$pick]}"
+    fi
+    log_info "Running pnpm ${script} in ${dir}"
+    ( cd "$dir" && pnpm "$script" )
+}
+alias run-prj='run_project'
+alias run-dev='run_project dev'
+alias run-prod='run_project start:prod'
 
-    # Ensure target project exists before executing pnpm
-    cd "$project" || {
-        log_err "Project not found: $project"
-        return 1
-    }
-
-    log_info "Running pnpm $script in $project"
-    pnpm "$script"
+# @name _listening_ports
+# @description Internal: one "<port>\t<pid>\t<command>" line per TCP listener whose
+#              process is visible (your own, or everyone's as root).
+_listening_ports() {
+    ss -tlnpH 2>/dev/null | awk '{
+        n = split($4, a, ":"); port = a[n]
+        if (match($0, /pid=[0-9]+/)) {
+            pid = substr($0, RSTART + 4, RLENGTH - 4)
+            cmd = "?"; if (match($0, /\(\("[^"]+"/)) cmd = substr($0, RSTART + 3, RLENGTH - 4)
+            print port "\t" pid "\t" cmd
+        }
+    }' | sort -u -n
 }
 
-# General alias to run project with parameters
-alias run-prj='run_project'
-
-# Aliases for a specific project (replace 'myproject' with your actual project name)
-alias run-dev='run_project dev'
-alias run-prj-dev='run_project dev'
-alias run-prod='run_project start:prod'
-alias run-prj-prod='run_project start:prod'
-
-# Stop dev server on a specified port (default: 3001).
-#
-# Usage:
-#   stop-dev [port] [-9]
-#
-# Arguments:
-#   port   (optional) Port number to target. Defaults to 3001.
-#   -9     (optional) Force kill (SIGKILL). Defaults to graceful (SIGTERM).
-#
-# Examples:
-#   stop-dev              # port 3001, graceful
-#   stop-dev -9           # port 3001, force
-#   stop-dev 3002         # port 3002, graceful
-#   stop-dev 3002 -9      # port 3002, force
-#   stop-dev -9 3002      # order-insensitive
+# @name stop_dev
+# @description Stop the process listening on a TCP port: SIGTERM, or SIGKILL with -9.
+#              With no port, pick from the listening processes (3001 highlighted when
+#              present); with no terminal, port 3001.
+# @param $1          int   Optional port (default: menu, or 3001 without a terminal)
+# @param -9          flag  SIGKILL instead of SIGTERM
+# @example stop-dev            # menu of listening processes
+# @example stop-dev 3002 -9
 stop_dev() {
-    local port_num=3001
-    local force=""
-
-    for arg in "$@"; do
-        if [[ "$arg" == "-9" ]]; then
-            force="-9"
-        elif [[ "$arg" =~ ^[0-9]+$ ]]; then
-            port_num=$arg
-        fi
+    local port="" sig="TERM" usage="usage: stop_dev [port] [-9]"
+    while (( $# )); do
+        case "$1" in
+            -9)          sig="KILL" ;;
+            -h | --help) echo "$usage"; return 0 ;;
+            *[!0-9]*)    log_err "Not a port: $1 -- ${usage}"; return 1 ;;
+            *)           port="$1" ;;
+        esac
+        shift
     done
 
-    local pid=$(sss | grep "${port_num}" | grep -oP "(?<=pid=)[0-9]+")
+    local -a rows
+    mapfile -t rows < <(_listening_ports)
+    if [[ -z "$port" ]]; then
+        if ui_tty && (( ${#rows[@]} )); then
+            local -a labels=()
+            local row p pid cmd cur=-1 pick i=0
+            for row in "${rows[@]}"; do
+                IFS=$'\t' read -r p pid cmd <<< "$row"
+                [[ "$p" == 3001 ]] && cur=$i
+                labels+=("$(printf '%-6s %s (pid %s)' "$p" "$cmd" "$pid")")
+                (( i++ ))
+            done
+            radioselect pick "Stop which listener?" "$cur" "${labels[@]}" || { log_info "Cancelled"; return 0; }
+            port=$(cut -f1 <<< "${rows[$pick]}")
+        else
+            port=3001
+        fi
+    fi
+
+    local pid
+    pid=$(printf '%s\n' "${rows[@]}" | awk -F'\t' -v p="$port" '$1 == p {print $2; exit}')
     if [[ -z "$pid" ]]; then
-        log_info "No process found on port ${port_num}"
+        log_info "No visible process listening on port ${port}"
         return 1
     fi
-
-    if [[ -n "$force" ]]; then
-        log_info "Force stopping dev server on port ${port_num} (pid=${pid})"
-        kill -9 "$pid"
-    else
-        log_info "Stopping dev server on port ${port_num} (pid=${pid})"
-        kill "$pid"
-    fi
+    log_info "Sending SIG${sig} to pid ${pid} (port ${port})"
+    kill -s "$sig" "$pid"
 }
 alias stop-dev='stop_dev'
-
-############################################################

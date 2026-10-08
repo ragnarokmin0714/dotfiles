@@ -1,66 +1,59 @@
 #!/usr/bin/env bash
 # @file .bash_pkg
-# @brief Package management and curated CLI toolkit helpers.
+# @brief Packages: check / ensure / remove / batch-install across managers, EPEL,
+#        and the curated CLI toolkit.
 # @description
-#   Everything package-shaped: the pkg_* family (installed / ensure / remove
-#   across apt, dnf, pip, pnpm, npm, go, cargo) and the curated toolkit
-#   (sys_toolkit, ensure_shfmt).
-#   Split out of .bash_functions to keep one domain per file (like .bash_git /
-#   .bash_nginx).
-#   Depends on .bash_env (sourced first) for log_* helpers, the STYLE map, and the
-#   PKG_* / SYS_TOOLKIT* configuration constants; and on .bash_functions for
-#   _pkg_manager (system apt/dnf detection, shared with sys_update) and the shared
-#   multiselect engine.
+#   apt and dnf are the system managers (PKG_MGR picks one per host); pip, pnpm, npm,
+#   go and cargo are supported by the single-package helpers. Package names are
+#   written once, distro-neutral, and translated through PKG_NAME_MAP (.bash_env).
+#   Depends on .bash_env (globals, log_*) and .bash_ui (radioselect, multiselect,
+#   confirm).
 
-# =========================
-# --- Package Utilities ---
-# =========================
+# @name _pkg_name
+# @description Internal: echo the name(s) <manager> knows <package> by -- the
+#              PKG_NAME_MAP entry if there is one (possibly several words, possibly
+#              empty: not packaged there), else the name unchanged.
+# @param $1 string  Manager
+# @param $2 string  Distro-neutral package name
+# @example _pkg_name dnf build-essential   # -> gcc gcc-c++ make
+_pkg_name() {
+    local key="$1:$2"
+    if [[ -n "${PKG_NAME_MAP[$key]+set}" ]]; then
+        echo "${PKG_NAME_MAP[$key]}"
+    else
+        echo "$2"
+    fi
+}
 
 # @name _pkg_is_installed
-# @description Internal: detect whether a package is installed via the given manager.
-#              Pure detection -- prints nothing for the installed/not-installed
-#              answer (caller logs). Only an unusable manager (binary missing or
-#              unsupported) logs an error and returns 2. Shared by pkg_installed,
-#              pkg_ensure, and pkg_remove to keep one source of truth for detection.
+# @description Internal: is a package installed via the given manager? Prints nothing
+#              for the answer (the caller reports); only an unusable manager logs.
 # @param $1 string  Manager: apt | dnf | pip | pnpm | npm | go | cargo
-# @param $2 string  Package name
-# @param $3 string  Optional "true" to check global scope (pip/pnpm/npm)
+# @param $2 string  Package name, as that manager knows it
+# @param $3 string  Optional "true" for global scope (pnpm/npm)
 # @returns 0 installed, 1 not installed, 2 manager unusable
 _pkg_is_installed() {
     local mgr="$1" pkg="$2" global_flag="${3:-false}"
-
     case "$mgr" in
         apt)
-            command -v apt &>/dev/null || { log_err "apt not found"; return 2; }
-            dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"
+            command -v dpkg-query &>/dev/null || { log_err "dpkg-query not found"; return 2; }
+            [[ "$(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null)" == "install ok installed" ]]
             ;;
         dnf)
-            command -v dnf &>/dev/null || { log_err "dnf not found"; return 2; }
-            dnf list installed "$pkg" &>/dev/null
+            command -v rpm &>/dev/null || { log_err "rpm not found"; return 2; }
+            rpm -q "$pkg" &>/dev/null
             ;;
         pip)
             command -v pip &>/dev/null || { log_err "pip not found"; return 2; }
             pip show "$pkg" &>/dev/null
             ;;
-        pnpm)
-            command -v pnpm &>/dev/null || { log_err "pnpm not found"; return 2; }
-            if [[ "$global_flag" == true ]]; then
-                pnpm list -g "$pkg" &>/dev/null
-            else
-                pnpm list "$pkg" &>/dev/null
-            fi
-            ;;
-        npm)
-            command -v npm &>/dev/null || { log_err "npm not found"; return 2; }
-            if [[ "$global_flag" == true ]]; then
-                npm list -g "$pkg" &>/dev/null
-            else
-                npm list "$pkg" &>/dev/null
-            fi
+        pnpm | npm)
+            command -v "$mgr" &>/dev/null || { log_err "${mgr} not found"; return 2; }
+            if [[ "$global_flag" == true ]]; then "$mgr" list -g "$pkg" &>/dev/null; else "$mgr" list "$pkg" &>/dev/null; fi
             ;;
         go)
             command -v go &>/dev/null || { log_err "go not found"; return 2; }
-            command -v "$(basename "$pkg")" &>/dev/null
+            command -v "$(basename "${pkg%@*}")" &>/dev/null
             ;;
         cargo)
             command -v cargo &>/dev/null || { log_err "cargo not found"; return 2; }
@@ -74,31 +67,20 @@ _pkg_is_installed() {
 }
 
 # @name _pkg_search_select
-# @description Internal: search apt/dnf for a query and present a radioselect
-#              menu, echoing the chosen package name to stdout. Only apt and dnf
-#              support package search; other managers return the query unchanged.
-#              All prompts/messages go to stderr so the caller can capture the
-#              choice via $(...) -- only the final package name reaches stdout.
-# @param $1 string  Manager
-# @param $2 string  Search query
-# @returns 0 with chosen name on stdout; 1 on no match, unusable tool, or cancel
+# @description Internal: search apt/dnf for a query and pick one result from a
+#              radioselect menu; echo the pick on stdout (prompts go to stderr, so
+#              callers capture it with $(...)). Other managers echo the query as is.
+# @returns 0 with the name on stdout; 1 on no match, no terminal, or cancel
 _pkg_search_select() {
     local mgr="$1" query="$2"
     local -a candidates=()
-
     case "$mgr" in
         dnf)
-            command -v dnf &>/dev/null || { log_err "dnf not found"; return 1; }
-            mapfile -t candidates < <(
-                dnf -q search "$query" 2>/dev/null \
-                    | grep ' : ' | awk '{ print $1 }' | sed 's/\.[^.]*$//' | sort -u
-            )
+            mapfile -t candidates < <(dnf -q search "$query" 2>/dev/null \
+                | grep ' : ' | awk '{ print $1 }' | sed 's/\.[^.]*$//' | sort -u)
             ;;
         apt)
-            command -v apt-cache &>/dev/null || { log_err "apt-cache not found"; return 1; }
-            mapfile -t candidates < <(
-                apt-cache search "$query" 2>/dev/null | awk '{ print $1 }' | sort -u
-            )
+            mapfile -t candidates < <(apt-cache search "$query" 2>/dev/null | awk '{ print $1 }' | sort -u)
             ;;
         *)
             log_warn "search not supported for ${mgr}; using exact name '${query}'" >&2
@@ -106,299 +88,272 @@ _pkg_search_select() {
             return 0
             ;;
     esac
-
-    if [[ ${#candidates[@]} -eq 0 ]]; then
-        log_err "No ${mgr} package matches '${query}'"
-        return 1
-    fi
-
-    log_info "Packages matching '${query}' (${mgr}):" >&2
+    (( ${#candidates[@]} )) || { log_err "No ${mgr} package matches '${query}'"; return 1; }
+    ui_tty || { printf '%s\n' "${candidates[@]}" >&2; log_err "Several packages match -- give one exactly"; return 1; }
     local choice
-    radioselect choice "" -1 "${candidates[@]}" || return 1
+    radioselect choice "Packages matching '${query}' (${mgr}):" -1 "${candidates[@]}" || return 1
     echo "${candidates[$choice]}"
 }
 
 # @name _pkg_available
-# @description Internal: return 0 if a package by the exact name exists for the
-#              given manager (installed or installable). Used by pkg_ensure to
-#              decide whether to auto-fall back to a search menu. Only apt/dnf are
-#              checked; other managers return 0 (no fallback -- keep exact name).
-# @param $1 string  Manager
-# @param $2 string  Exact package name
-# @returns 0 exists or not checkable, 1 unknown to apt/dnf
+# @description Internal: does apt/dnf know a package by this exact name (installed or
+#              installable)? Other managers always answer yes (no search fallback).
 _pkg_available() {
-    local mgr="$1" pkg="$2"
-    case "$mgr" in
-        dnf) dnf info "$pkg" &>/dev/null ;;
-        apt) apt-cache show "$pkg" &>/dev/null ;;
+    case "$1" in
+        dnf) dnf -q info "$2" &>/dev/null ;;
+        apt) apt-cache show "$2" &>/dev/null ;;
         *)   return 0 ;;
     esac
 }
 
-# @name pkg_installed
-# @description Check if a package is installed and report the result. Returns 0 if
-#              installed, 1 if not, 2 if the manager is unusable. Supports apt,
-#              dnf, pip, pnpm, npm, go, and cargo (rust).
-# @param -m | --manager string  Package manager: apt | dnf | pip | pnpm | npm | go | cargo
-#                                (default: $PKG_DEFAULT_MANAGER, dnf)
-# @param -p | --package string  Package name to check
-# @param -g | --global  flag    Optional, for pip/pnpm/npm global scope
-# @param -s | --search  flag    Optional, search apt/dnf and pick from a menu
-#                                (other managers fall back to the exact name)
-# @example pi bash                    # 'pi' alias; default dnf + positional name
-# @example pkg_installed -p git
-# @example pkg_installed -m dnf vim   # -p optional: package name may be positional
-# @example pkg_installed -m npm -p eslint -g
-# @example pkg_installed -p chrome -s
-pkg_installed() {
-    local mgr="${PKG_DEFAULT_MANAGER:-dnf}" pkg="" global_flag=false search_flag=false
-
-    while [[ $# -gt 0 ]]; do
+# @name _pkg_args
+# @description Internal: shared option parser for pkg_installed / pkg_ensure /
+#              pkg_remove. Sets the caller's locals mgr, pkg, global_flag, yes_flag,
+#              search_flag (declared by the caller); returns 1 on a bad option.
+#              One parser, so the three can never drift apart in what they accept.
+_pkg_args() {
+    while (( $# )); do
         case "$1" in
-            -m | --manager) mgr="$2"; shift 2 ;;
-            -p | --package) pkg="$2"; shift 2 ;;
-            -g | --global)  global_flag=true; shift ;;
-            -s | --search)  search_flag=true; shift ;;
-            *) [[ -z "$pkg" && "$1" != -* ]] && pkg="$1"; shift ;;
+            -m | --manager) mgr="${2:-}"; shift ;;
+            -p | --package) pkg="${2:-}"; shift ;;
+            -g | --global)  global_flag=true ;;
+            -s | --search)  search_flag=true ;;
+            -y | --yes)     yes_flag=true ;;
+            -*) log_err "Unknown option: $1"; return 1 ;;
+            *)  [[ -z "$pkg" ]] && pkg="$1" ;;
         esac
+        shift
     done
+    case "$mgr" in apt | dnf) pkg=$(_pkg_name "$mgr" "$pkg") ;; esac
+    return 0
+}
 
-    if [[ -z "$pkg" ]]; then
-        log_err "Usage: pkg_installed [-m <${PKG_MANAGERS_HELP}>] [-p] <package> [-g] [-s]"
-        return 1
-    fi
-
-    if [[ "$search_flag" == true ]]; then
-        local resolved
-        resolved=$(_pkg_search_select "$mgr" "$pkg") || return 1
-        pkg="$resolved"
-    fi
+# @name pkg_installed
+# @description Report whether a package is installed.
+# @param -m | --manager string  apt | dnf | pip | pnpm | npm | go | cargo
+#                                (default: PKG_DEFAULT_MANAGER)
+# @param -p | --package string  Package (or give it positionally)
+# @param -g | --global  flag    pnpm/npm global scope
+# @param -s | --search  flag    Search apt/dnf and pick from a menu
+# @returns 0 installed, 1 not, 2 manager unusable
+# @example pi git
+# @example pkg_installed -m npm -g eslint
+pkg_installed() {
+    local mgr="$PKG_DEFAULT_MANAGER" pkg="" global_flag=false yes_flag=false search_flag=false
+    _pkg_args "$@" || return 1
+    [[ -n "$pkg" ]] || { log_err "usage: pkg_installed [-m <${PKG_MANAGERS_HELP}>] [-g] [-s] <package>"; return 1; }
+    if [[ "$search_flag" == true ]]; then pkg=$(_pkg_search_select "$mgr" "$pkg") || return 1; fi
 
     _pkg_is_installed "$mgr" "$pkg" "$global_flag"
-    local rc=$?
-    case "$rc" in
+    case $? in
         0) log_ok "${pkg} is installed (${mgr})"; return 0 ;;
         1) log_err "${pkg} is not installed (${mgr})"; return 1 ;;
-        *) return "$rc" ;;  # 2: _pkg_is_installed already logged the reason
+        *) return 2 ;;
     esac
 }
 alias pkg-installed='pkg_installed'
 alias pi='pkg_installed'
 
 # @name pkg_ensure
-# @description Check if a package is installed, prompt to install if not.
-#              Supports apt, dnf, pip, pnpm, npm, go, and cargo (rust). If the
-#              exact name is unknown to apt/dnf, automatically falls back to a
-#              search menu; -s forces the menu even when the name matches.
-# @param -m | --manager string  Package manager: apt | dnf | pip | pnpm | npm | go | cargo
-#                                (default: $PKG_DEFAULT_MANAGER, dnf)
-# @param -p | --package string  Package name to check and optionally install
-# @param -g | --global  flag    Optional, for pip/pnpm/npm global install
-# @param -y | --yes     flag    Optional, auto-confirm install (non-interactive)
-# @param -s | --search  flag    Optional, search apt/dnf and pick from a menu
-#                                (other managers fall back to the exact name)
-# @example pe chrome                 # exact name unknown to dnf -> auto search menu
-# @example pe shfmt                  # 'pe' alias; default dnf + positional name
-# @example pkg_ensure -m dnf -p shfmt
-# @example pkg_ensure -m dnf shfmt   # -p optional: package name may be positional
-# @example pkg_ensure -p chrome -s
-# @example pkg_ensure -m apt -p git -y
-# @example pkg_ensure -m pip -p requests
-# @example pkg_ensure -m pnpm -p typescript -g
-# @example pkg_ensure -m npm -p eslint -g
-# @example pkg_ensure -m go -p golang.org/x/tools/cmd/goimports
-# @example pkg_ensure -m cargo -p ripgrep
+# @description Make sure one package is installed: report it if it is, else offer to
+#              install it. A name apt/dnf does not know opens a search menu (or with
+#              -s, always) -- except under -y, which never asks anything: an unknown
+#              name is then an error, to be fixed with a PKG_NAME_MAP entry.
+# @param -m | --manager string  apt | dnf | pip | pnpm | npm | go | cargo
+# @param -p | --package string  Package (or give it positionally)
+# @param -g | --global  flag    pnpm/npm global install
+# @param -y | --yes     flag    Install without asking
+# @param -s | --search  flag    Search apt/dnf and pick from a menu
+# @example pe jq
+# @example pkg_ensure -m apt -y git
+# @example pkg_ensure -m pnpm -g typescript
+# @example pkg_ensure -m go golang.org/x/tools/cmd/goimports
 pkg_ensure() {
-    local mgr="${PKG_DEFAULT_MANAGER:-dnf}" pkg="" global_flag=false yes_flag=false search_flag=false
+    local mgr="$PKG_DEFAULT_MANAGER" pkg="" global_flag=false yes_flag=false search_flag=false
+    _pkg_args "$@" || return 1
+    [[ -n "$pkg" ]] || { log_err "usage: pkg_ensure [-m <${PKG_MANAGERS_HELP}>] [-g] [-y] [-s] <package>"; return 1; }
+    if [[ "$search_flag" == true ]]; then pkg=$(_pkg_search_select "$mgr" "$pkg") || return 1; fi
 
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -m | --manager) mgr="$2"; shift 2 ;;
-            -p | --package) pkg="$2"; shift 2 ;;
-            -g | --global)  global_flag=true; shift ;;
-            -s | --search)  search_flag=true; shift ;;
-            -y | --yes)     yes_flag=true; shift ;;
-            *) [[ -z "$pkg" && "$1" != -* ]] && pkg="$1"; shift ;;
-        esac
-    done
-
-    if [[ -z "$pkg" ]]; then
-        log_err "Usage: pkg_ensure [-m <${PKG_MANAGERS_HELP}>] [-p] <package> [-g] [-y] [-s]"
-        return 1
-    fi
-
-    if [[ "$search_flag" == true ]]; then
-        local resolved
-        resolved=$(_pkg_search_select "$mgr" "$pkg") || return 1
-        pkg="$resolved"
-    fi
-
-    # ── Check installed status ────────────────────────────────────────────────
     _pkg_is_installed "$mgr" "$pkg" "$global_flag"
     local rc=$?
-    [[ "$rc" -eq 2 ]] && return 2  # unusable manager; helper already logged
-    if [[ "$rc" -eq 0 ]]; then
-        log_ok "${pkg} is already installed (${mgr})"
-        return 0
-    fi
+    (( rc == 2 )) && return 2
+    (( rc == 0 )) && { log_ok "${pkg} is already installed (${mgr})"; return 0; }
 
-    # ── Auto-fallback: exact name unknown to apt/dnf -> open a search menu ─────
     if [[ "$search_flag" != true ]] && ! _pkg_available "$mgr" "$pkg"; then
+        [[ "$yes_flag" == true ]] && { log_err "'${pkg}' is unknown to ${mgr} -- add a PKG_NAME_MAP entry"; return 1; }
         log_warn "'${pkg}' not found in ${mgr}; searching for similar packages..."
-        local picked
-        picked=$(_pkg_search_select "$mgr" "$pkg") || return 1
-        pkg="$picked"
-        if _pkg_is_installed "$mgr" "$pkg" "$global_flag"; then
-            log_ok "${pkg} is already installed (${mgr})"
-            return 0
-        fi
+        pkg=$(_pkg_search_select "$mgr" "$pkg") || return 1
+        _pkg_is_installed "$mgr" "$pkg" "$global_flag" && { log_ok "${pkg} is already installed (${mgr})"; return 0; }
     fi
 
-    # ── Prompt to install ─────────────────────────────────────────────────────
-    log_err "${pkg} is not installed (${mgr})"
-    local answer="n"
-    if [[ "$yes_flag" == true ]]; then
-        answer="y"
-    else
-        read -rp "Install ${pkg} now via ${mgr}? (y/N): " answer
-    fi
+    log_warn "${pkg} is not installed (${mgr})"
+    [[ "$yes_flag" == true ]] || confirm "Install ${pkg} now via ${mgr}?" || { log_step "Skipped ${pkg}"; return 1; }
 
-    if [[ "${answer,,}" == "y" ]]; then
-        log_step "Installing ${pkg} via ${mgr}..."
-        case "$mgr" in
-            apt)   sudo apt install -y "$pkg" ;;
-            dnf)   sudo dnf install -y "$pkg" ;;
-            pip)   pip install "$pkg" ;;
-            pnpm)
-                if [[ "$global_flag" == true ]]; then
-                    pnpm add -g "$pkg"
-                else
-                    pnpm add "$pkg"
-                fi
-                ;;
-            npm)
-                if [[ "$global_flag" == true ]]; then
-                    npm install -g "$pkg"
-                else
-                    npm install "$pkg"
-                fi
-                ;;
-            go)    go install "${pkg}@latest" ;;
-            cargo) cargo install "$pkg" ;;
-        esac
-
-        if [[ $? -eq 0 ]]; then
-            log_ok "${pkg} installed successfully"
-        else
-            log_err "Failed to install ${pkg}"
-            return 1
-        fi
-    else
-        log_step "Skipped installation of ${pkg}"
-        return 1
-    fi
+    log_step "Installing ${pkg} via ${mgr}..."
+    local -a g=()
+    [[ "$global_flag" == true ]] && g=(-g)
+    case "$mgr" in
+        apt)   $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg" ;;
+        dnf)   $SUDO dnf install -y "$pkg" ;;
+        pip)   pip install "$pkg" ;;
+        pnpm)  pnpm add "${g[@]}" "$pkg" ;;
+        npm)   npm install "${g[@]}" "$pkg" ;;
+        go)    go install "${pkg%@*}@latest" ;;
+        cargo) cargo install "$pkg" ;;
+    esac || { log_err "Failed to install ${pkg}"; return 1; }
+    log_ok "${pkg} installed"
 }
 alias pkg-ensure='pkg_ensure'
 alias pe='pkg_ensure'
 
 # @name pkg_remove
-# @description Check if a package is installed, prompt to remove if so. Counterpart
-#              to pkg_ensure. Supports apt, dnf, pip, pnpm, npm, go, and cargo (rust).
-# @param -m | --manager string  Package manager: apt | dnf | pip | pnpm | npm | go | cargo
-#                                (default: $PKG_DEFAULT_MANAGER, dnf)
-# @param -p | --package string  Package name to check and optionally remove
-# @param -g | --global  flag    Optional, for pip/pnpm/npm global package
-# @param -y | --yes     flag    Optional, auto-confirm removal (non-interactive)
-# @param -s | --search  flag    Optional, search apt/dnf and pick from a menu
-#                                (other managers fall back to the exact name)
-# @example prm shfmt -y              # 'prm' alias; default dnf, auto-confirm removal
-# @example pkg_remove -m dnf -p shfmt
-# @example pkg_remove -m dnf shfmt   # -p optional: package name may be positional
-# @example pkg_remove -p chrome -s
-# @example pkg_remove -m apt -p git -y
-# @example pkg_remove -m npm -p eslint -g
-# @example pkg_remove -m go -p goimports
-# @example pkg_remove -m cargo -p ripgrep
+# @description Remove one package if installed, after a confirmation (-y skips it).
+# @param -m | --manager string  apt | dnf | pip | pnpm | npm | go | cargo
+# @param -p | --package string  Package (or give it positionally)
+# @param -g | --global  flag    pnpm/npm global package
+# @param -y | --yes     flag    Remove without asking
+# @param -s | --search  flag    Search apt/dnf and pick from a menu
+# @example prm shfmt -y
+# @example pkg_remove -m npm -g eslint
 pkg_remove() {
-    local mgr="${PKG_DEFAULT_MANAGER:-dnf}" pkg="" global_flag=false yes_flag=false search_flag=false
+    local mgr="$PKG_DEFAULT_MANAGER" pkg="" global_flag=false yes_flag=false search_flag=false
+    _pkg_args "$@" || return 1
+    [[ -n "$pkg" ]] || { log_err "usage: pkg_remove [-m <${PKG_MANAGERS_HELP}>] [-g] [-y] [-s] <package>"; return 1; }
+    if [[ "$search_flag" == true ]]; then pkg=$(_pkg_search_select "$mgr" "$pkg") || return 1; fi
 
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -m | --manager) mgr="$2"; shift 2 ;;
-            -p | --package) pkg="$2"; shift 2 ;;
-            -g | --global)  global_flag=true; shift ;;
-            -s | --search)  search_flag=true; shift ;;
-            -y | --yes)     yes_flag=true; shift ;;
-            *) [[ -z "$pkg" && "$1" != -* ]] && pkg="$1"; shift ;;
-        esac
-    done
-
-    if [[ -z "$pkg" ]]; then
-        log_err "Usage: pkg_remove [-m <${PKG_MANAGERS_HELP}>] [-p] <package> [-g] [-y] [-s]"
-        return 1
-    fi
-
-    if [[ "$search_flag" == true ]]; then
-        local resolved
-        resolved=$(_pkg_search_select "$mgr" "$pkg") || return 1
-        pkg="$resolved"
-    fi
-
-    # ── Check installed status ────────────────────────────────────────────────
     _pkg_is_installed "$mgr" "$pkg" "$global_flag"
     local rc=$?
-    [[ "$rc" -eq 2 ]] && return 2  # unusable manager; helper already logged
-    if [[ "$rc" -ne 0 ]]; then
-        log_ok "${pkg} is not installed (${mgr}), nothing to remove"
-        return 0
-    fi
+    (( rc == 2 )) && return 2
+    (( rc == 0 )) || { log_ok "${pkg} is not installed (${mgr}), nothing to remove"; return 0; }
 
-    # ── Prompt to remove ──────────────────────────────────────────────────────
-    log_warn "${pkg} is installed (${mgr})"
-    local answer="n"
-    if [[ "$yes_flag" == true ]]; then
-        answer="y"
-    else
-        read -rp "Remove ${pkg} now via ${mgr}? (y/N): " answer
-    fi
-
-    if [[ "${answer,,}" == "y" ]]; then
-        log_step "Removing ${pkg} via ${mgr}..."
-        case "$mgr" in
-            apt)   sudo apt remove -y "$pkg" ;;
-            dnf)   sudo dnf remove -y "$pkg" ;;
-            pip)   pip uninstall -y "$pkg" ;;
-            pnpm)
-                if [[ "$global_flag" == true ]]; then
-                    pnpm remove -g "$pkg"
-                else
-                    pnpm remove "$pkg"
-                fi
-                ;;
-            npm)
-                if [[ "$global_flag" == true ]]; then
-                    npm uninstall -g "$pkg"
-                else
-                    npm uninstall "$pkg"
-                fi
-                ;;
-            go)    rm -f "$(go env GOPATH)/bin/$(basename "$pkg")" ;;
-            cargo) cargo uninstall "$pkg" ;;
-        esac
-
-        if [[ $? -eq 0 ]]; then
-            log_ok "${pkg} removed successfully"
-        else
-            log_err "Failed to remove ${pkg}"
-            return 1
-        fi
-    else
-        log_step "Skipped removal of ${pkg}"
-        return 1
-    fi
+    [[ "$yes_flag" == true ]] || confirm "Remove ${pkg} via ${mgr}?" || { log_step "Kept ${pkg}"; return 1; }
+    log_step "Removing ${pkg} via ${mgr}..."
+    local -a g=()
+    [[ "$global_flag" == true ]] && g=(-g)
+    case "$mgr" in
+        apt)   $SUDO env DEBIAN_FRONTEND=noninteractive apt-get remove -y "$pkg" ;;
+        dnf)   $SUDO dnf remove -y "$pkg" ;;
+        pip)   pip uninstall -y "$pkg" ;;
+        pnpm)  pnpm remove "${g[@]}" "$pkg" ;;
+        npm)   npm uninstall "${g[@]}" "$pkg" ;;
+        go)    rm -f "$(go env GOPATH)/bin/$(basename "${pkg%@*}")" ;;
+        cargo) cargo uninstall "$pkg" ;;
+    esac || { log_err "Failed to remove ${pkg}"; return 1; }
+    log_ok "${pkg} removed"
 }
 alias pkg-remove='pkg_remove'
 alias prm='pkg_remove'
+
+# @name pkg_install
+# @description Install system packages in one apt/dnf transaction, non-interactively:
+#              names are translated through PKG_NAME_MAP, the ones already installed
+#              are left out, and nothing asks. What scripts and deploy modules use;
+#              pkg_ensure is the interactive one-package counterpart. Refreshes a
+#              missing or day-old apt index first, since a fresh image has none.
+# @param -m | --manager  string  apt | dnf (default: PKG_MGR)
+# @param -n | --dry-run  flag    Print the command, run nothing
+# @param $@              string  Packages, distro-neutral names
+# @example pkg_install git jq build-essential
+# @example pkg_install -n cron      # dnf: would install cronie
+pkg_install() {
+    local mgr="$PKG_MGR" dry=0 usage="usage: pkg_install [-m apt|dnf] [-n] <package>..."
+    local -a wanted=()
+    while (( $# )); do
+        case "$1" in
+            -m | --manager) mgr="${2:-}"; shift ;;
+            -n | --dry-run) dry=1 ;;
+            -h | --help)    echo "$usage"; return 0 ;;
+            -*) log_err "Unknown option: $1 -- ${usage}"; return 1 ;;
+            *)  wanted+=("$1") ;;
+        esac
+        shift
+    done
+    (( ${#wanted[@]} )) || { log_err "$usage"; return 1; }
+    case "$mgr" in
+        apt | dnf) ;;
+        *) log_err "pkg_install handles apt and dnf -- for ${mgr:-?} use pkg_ensure -m"; return 1 ;;
+    esac
+
+    # A dry run of the other family (OS_FAMILY preset) has no rpm/dpkg to ask:
+    # then everything counts as missing.
+    local query=1
+    command -v "$([[ "$mgr" == apt ]] && echo dpkg-query || echo rpm)" &>/dev/null || query=0
+    (( query || dry )) || { log_err "${mgr} is not usable on this host"; return 1; }
+
+    local -a missing=() names
+    local w n
+    for w in "${wanted[@]}"; do
+        read -ra names <<< "$(_pkg_name "$mgr" "$w")"
+        (( ${#names[@]} )) || { log_info "${w}: not needed on ${mgr} (PKG_NAME_MAP) -- skipped"; continue; }
+        for n in "${names[@]}"; do
+            (( query )) && _pkg_is_installed "$mgr" "$n" && continue
+            missing+=("$n")
+        done
+    done
+    (( ${#missing[@]} )) || { log_ok "Already installed: ${wanted[*]}"; return 0; }
+
+    local -a cmd
+    case "$mgr" in
+        apt) cmd=(env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}") ;;
+        dnf) cmd=(dnf install -y "${missing[@]}") ;;
+    esac
+    if (( dry )); then
+        log_info "Dry run -- would run: ${SUDO:+$SUDO }${cmd[*]}"
+        return 0
+    fi
+    if [[ "$mgr" == apt ]] && ! find /var/lib/apt/lists -maxdepth 1 -name '*_Packages' -mmin -1440 2>/dev/null | grep -q .; then
+        log_step "Refreshing the apt index..."
+        $SUDO apt-get update -qq || { log_err "apt-get update failed"; return 1; }
+    fi
+    log_step "Installing via ${mgr}: ${missing[*]}"
+    $SUDO "${cmd[@]}" || { log_err "Install failed: ${missing[*]}"; return 1; }
+    log_ok "Installed: ${missing[*]}"
+}
+alias pkg-install='pkg_install'
+
+# @name pkg_enable_epel
+# @description Enable EPEL on the RHEL family -- where htop, lnav and friends come
+#              from -- together with CRB, which EPEL packages depend on. Rocky and
+#              Alma ship both in their own repos; RHEL enables CRB through
+#              subscription-manager and installs EPEL from Fedora's release rpm.
+#              A no-op elsewhere, and when EPEL is already there.
+# @param -n | --dry-run  flag  Print the commands, run nothing
+# @example pkg_enable_epel
+pkg_enable_epel() {
+    local dry=0
+    case "${1:-}" in
+        -n | --dry-run) dry=1 ;;
+        -h | --help)    echo "usage: pkg_enable_epel [-n]"; return 0 ;;
+    esac
+    [[ "$OS_FAMILY" == rhel ]] || { log_info "EPEL is for the RHEL family -- nothing to do on ${OS_ID}"; return 0; }
+    if command -v rpm &>/dev/null && rpm -q epel-release &>/dev/null; then
+        log_ok "EPEL already enabled"
+        return 0
+    fi
+    local -a steps
+    if [[ "$OS_ID" == rhel ]]; then
+        steps=("subscription-manager repos --enable codeready-builder-for-rhel-${OS_MAJOR}-$(uname -m)-rpms"
+               "dnf install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-${OS_MAJOR}.noarch.rpm")
+    else
+        steps=("dnf install -y dnf-plugins-core"
+               "dnf config-manager --set-enabled crb"
+               "dnf install -y epel-release")
+    fi
+    if (( dry )); then
+        log_info "Dry run -- would run:"
+        printf "  ${SUDO:+$SUDO }%s\n" "${steps[@]}"
+        return 0
+    fi
+    local step
+    local -a argv
+    for step in "${steps[@]}"; do
+        read -ra argv <<< "$step"
+        log_step "Running: ${step}"
+        $SUDO "${argv[@]}" || { log_err "Failed: ${step}"; return 1; }
+    done
+    log_ok "EPEL and CRB enabled"
+}
+alias pkg-enable-epel='pkg_enable_epel'
 
 # @name pkg_unused
 # @description Report installed rpm packages that have never been used, ranked by
@@ -438,7 +393,7 @@ pkg_unused() {
 
     command -v python3 &>/dev/null || { log_err "python3 not found"; return 1; }
     command -v dnf &>/dev/null || { log_err "pkg_unused is dnf/rpm only"; return 1; }
-    [[ -f "$engine" ]] || { log_err "Engine not found: ${engine}"; return 1; }
+    [[ -f "$engine" ]] || { log_err "Engine not found: ${engine} -- put pkg_usage.py in configs/alias/ and redeploy (dotfiles shell)"; return 1; }
 
     local -a flags=(--min-size "$min_size")
     [[ "$quick" == true ]] && flags+=(--no-dry-run)
@@ -486,9 +441,7 @@ pkg_unused() {
     echo ""
     log_warn "Read pkg_usage.py's blind spots before removing -- a package updated"
     log_warn "recently looks unused even if you use it daily."
-    local answer
-    read -rp "Pick packages to remove? (y/N): " answer
-    [[ "${answer,,}" == "y" ]] || { log_step "Left everything installed"; return 0; }
+    confirm "Pick packages to remove?" || { log_step "Left everything installed"; return 0; }
 
     local PICKS
     multiselect PICKS "Remove which packages?" "${labels[@]}" || {
@@ -508,28 +461,17 @@ alias pun='pkg_unused'
 # --- Toolkit ---
 # =========================
 
-# The curated package lists SYS_TOOLKIT / SYS_TOOLKIT_OPTIONAL are defined in
-# .bash_env (@section Defaults, sourced before this file), next to
-# PKG_DEFAULT_MANAGER -- edit the toolkit there.
-
 # @name _sys_toolkit_menu
-# @description Internal: `sys_toolkit -m` UI. Builds a status label per package
-#              (installed → remove / missing → install) and delegates the interactive
-#              multi-select to the shared multiselect engine, then applies the picks:
-#              installed picks are removed (pkg_remove -y), missing picks installed
-#              (pkg_ensure -y). Prints an applied/failed summary.
-# @param $1     string  Package manager (apt|dnf)
-# @param $2..   string  Package names to manage
-# @depends multiselect, pkg_ensure, pkg_remove, _pkg_is_installed
+# @description Internal: `sys_toolkit -m`. One label per package -- installed ones are
+#              offered for removal, missing ones for install -- picked with
+#              multiselect, then applied with pkg_remove -y / pkg_install.
+# @param $@ string  Distro-neutral package names
 _sys_toolkit_menu() {
-    local mgr="$1"; shift
-    local -a pkgs=("$@")
-    local -a installed=() labels=()
-    local i tag
-
-    # Build one status label per package; multiselect returns the chosen indices.
+    local -a pkgs=("$@") installed=() labels=()
+    local i name tag
     for i in "${!pkgs[@]}"; do
-        if _pkg_is_installed "$mgr" "${pkgs[$i]}"; then
+        name=$(_pkg_name "$PKG_MGR" "${pkgs[$i]}")
+        if [[ -n "$name" ]] && _pkg_is_installed "$PKG_MGR" "${name%% *}"; then
             installed[i]=true;  tag="(installed → remove)"
         else
             installed[i]=false; tag="(missing → install)"
@@ -538,100 +480,67 @@ _sys_toolkit_menu() {
     done
 
     local selected
-    multiselect selected \
-        "Toolkit menu (${mgr})" \
-        "${labels[@]}" || { log_info "Cancelled"; return 0; }
-
+    multiselect selected "Toolkit (${PKG_MGR})" "${labels[@]}" || { log_info "Cancelled"; return 0; }
     local -a picks
     read -ra picks <<< "$selected"
-    if [[ ${#picks[@]} -eq 0 ]]; then
-        log_info "No packages selected"
-        return 0
-    fi
+    (( ${#picks[@]} )) || { log_info "No packages selected"; return 0; }
 
-    # Apply: installed picks are removed, missing picks are installed.
-    local -a failed=()
-    local idx pkg
+    local -a failed=() add=()
+    local idx
     for idx in "${picks[@]}"; do
-        pkg="${pkgs[$idx]}"
         if [[ "${installed[$idx]}" == true ]]; then
-            pkg_remove -m "$mgr" -p "$pkg" -y || failed+=("$pkg")
+            pkg_remove -m "$PKG_MGR" -y "${pkgs[$idx]}" || failed+=("${pkgs[$idx]}")
         else
-            pkg_ensure -m "$mgr" -p "$pkg" -y || failed+=("$pkg")
+            add+=("${pkgs[$idx]}")
         fi
     done
-
-    if [[ ${#failed[@]} -eq 0 ]]; then
-        log_ok "Toolkit menu: applied ${#picks[@]} change(s) successfully (${mgr})"
-        return 0
-    fi
-    log_err "Toolkit menu: ${#failed[@]} action(s) failed -> ${failed[*]}"
-    return 1
+    (( ${#add[@]} )) && { pkg_install "${add[@]}" || failed+=("${add[@]}"); }
+    (( ${#failed[@]} )) && { log_err "Toolkit: failed -> ${failed[*]}"; return 1; }
+    log_ok "Toolkit: applied ${#picks[@]} change(s)"
 }
 
 # @name sys_toolkit
-# @description Manage the curated CLI toolkit. Auto-detects the system package
-#              manager (apt/dnf, like sys_update). Two modes:
-#              - Batch (default): runs pkg_ensure -y for each entry, so installed
-#                tools are skipped and a failed package is recorded without aborting
-#                the batch; prints an ok/failed summary and returns non-zero on any
-#                failure.
-#              - Menu (-m): interactive multi-select over the full set (core +
-#                optional) -- pick missing tools to install and installed tools to
-#                remove. Delegates the UI to _sys_toolkit_menu.
-# @param -o | --optional  flag  Batch mode: also install SYS_TOOLKIT_OPTIONAL (e.g. gh)
-# @param -m | --menu      flag  Interactive multi-select install/remove mode
-# @depends _pkg_manager, pkg_ensure, pkg_remove, _sys_toolkit_menu
-# @example sys_toolkit           # batch: install/verify the default toolkit
-# @example sys_toolkit -o        # batch: also include the optional tools (gh, ...)
-# @example sys_toolkit -m        # menu: pick tools to install/remove interactively
-# @example toolkit               # 'toolkit' alias
+# @description Install the curated CLI toolkit (SYS_TOOLKIT, .bash_env) with the
+#              system package manager, in one transaction. On the RHEL family, enable
+#              EPEL first (pkg_enable_epel) -- htop and lnav live there.
+# @param -o | --optional  flag  Also install SYS_TOOLKIT_OPTIONAL (gh, ripgrep, ...)
+# @param -m | --menu      flag  Pick tools to install / remove from the full set
+# @param -n | --dry-run   flag  Print what would be installed, change nothing
+# @example toolkit           # default set
+# @example toolkit -o        # with the optional tools
+# @example toolkit -m        # menu
 sys_toolkit() {
-    local include_optional=false menu=false
-    while [[ $# -gt 0 ]]; do
+    local optional=0 menu=0 dry=0 usage="usage: sys_toolkit [-o] [-m] [-n]"
+    while (( $# )); do
         case "$1" in
-            -o | --optional) include_optional=true; shift ;;
-            -m | --menu)     menu=true; shift ;;
-            *) log_err "Unknown option: $1 (usage: sys_toolkit [-o] [-m])"; return 1 ;;
+            -o | --optional) optional=1 ;;
+            -m | --menu)     menu=1 ;;
+            -n | --dry-run)  dry=1 ;;
+            -h | --help)     echo "$usage"; return 0 ;;
+            *) log_err "Unknown option: $1 -- ${usage}"; return 1 ;;
         esac
+        shift
     done
-
-    # Auto-detect the system package manager (shared with sys_update; _pkg_manager
-    # lives in .bash_functions).
-    local mgr
-    mgr=$(_pkg_manager) || { log_err "No supported package manager found (apt/dnf)"; return 1; }
-
-    # Menu mode manages the full set (core + optional); batch mode honors -o.
+    [[ -n "$PKG_MGR" ]] || { log_err "No supported package manager (OS family: ${OS_FAMILY})"; return 1; }
     local -a tools=("${SYS_TOOLKIT[@]}")
-    if [[ "$menu" == true || "$include_optional" == true ]]; then
-        tools+=("${SYS_TOOLKIT_OPTIONAL[@]}")
-    fi
+    (( optional || menu )) && tools+=("${SYS_TOOLKIT_OPTIONAL[@]}")
 
-    if [[ "$menu" == true ]]; then
-        _sys_toolkit_menu "$mgr" "${tools[@]}"
-        return $?
+    if (( menu )); then
+        ui_tty || { log_err "The toolkit menu needs a terminal -- use sys_toolkit [-o]"; return 1; }
+        _sys_toolkit_menu "${tools[@]}"
+        return
     fi
-
-    log_step "Ensuring ${#tools[@]} toolkit package(s) via ${mgr}..."
-    local -a failed=()
-    local pkg
-    for pkg in "${tools[@]}"; do
-        pkg_ensure -m "$mgr" -p "$pkg" -y || failed+=("$pkg")
-    done
-
-    if [[ ${#failed[@]} -eq 0 ]]; then
-        log_ok "Toolkit ready: all ${#tools[@]} package(s) present (${mgr})"
-        return 0
-    fi
-    log_err "Toolkit incomplete: ${#failed[@]} failed -> ${failed[*]}"
-    return 1
+    local -a n=()
+    (( dry )) && n=(-n)
+    pkg_enable_epel "${n[@]}" || return 1
+    pkg_install "${n[@]}" "${tools[@]}"
 }
 alias sys-toolkit='sys_toolkit'
 alias toolkit='sys_toolkit'
 
 # @name ensure_shfmt
 # @description Install shfmt from its official GitHub release binary into
-#              /usr/local/sbin, since shfmt is not packaged for dnf/EPEL. Resolves
+#              /usr/local/bin, since shfmt is not packaged for dnf/EPEL. Resolves
 #              the latest version, downloads the matching linux binary plus the
 #              release checksum file, verifies the SHA-256, then installs it mode
 #              755. Idempotent: skips if shfmt is already on PATH unless -f is given.
@@ -673,8 +582,8 @@ ensure_shfmt() {
     if curl -fsSL "${base}/${asset}" -o "${tmp}/${asset}" \
         && curl -fsSL "${base}/sha256sums.txt" -o "${tmp}/sums.txt" \
         && (cd "$tmp" && grep " ${asset}\$" sums.txt | sha256sum -c --status -) \
-        && sudo install -m 755 "${tmp}/${asset}" /usr/local/sbin/shfmt; then
-        log_ok "shfmt installed: $(shfmt --version 2>/dev/null) (/usr/local/sbin/shfmt)"
+        && $SUDO install -m 755 "${tmp}/${asset}" /usr/local/bin/shfmt; then
+        log_ok "shfmt installed: $(shfmt --version 2>/dev/null) (/usr/local/bin/shfmt)"
         rm -rf "$tmp"
     else
         log_err "Failed to install shfmt ${tag} (download/checksum/install error)"
@@ -683,4 +592,3 @@ ensure_shfmt() {
     fi
 }
 alias ensure-shfmt='ensure_shfmt'
-############################################################

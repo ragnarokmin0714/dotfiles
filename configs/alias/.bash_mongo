@@ -1,36 +1,49 @@
-# =========================
-# --- MongoDB ---
-# =========================
-#
-# Schema/data changes for this project go through migrate-mongo, never by hand
-# (see .claude/CLAUDE.md rule 6). This file therefore provides read/observe,
-# backup, and migrate-mongo wrappers only — no drop/update shortcuts.
-#
-# Note: the installed client is the legacy `mongo` shell (v4.4), not `mongosh`.
+#!/usr/bin/env bash
+# @file .bash_mongo
+# @brief MongoDB: read/observe, backup/restore and migrate-mongo wrappers for one
+#        project database.
+# @description
+#   Schema/data changes go through migrate-mongo, never by hand, so there are no
+#   drop/update shortcuts here. The project is configured, not assumed: set
+#   MONGO_PROJECT_DIR (the checkout holding .env.local with MONGO_DB_KEY),
+#   MONGO_DB_NAME and MONGO_DB_USER in .bash_local. The shell is mongosh when
+#   installed, else the legacy mongo (4.4) -- override with MONGO_SHELL.
 #
 # Credential exposure: these helpers build a mongodb:// URI containing the password.
 # mongodump/mongorestore echo that whole URI — password included — in their connection
 # error messages, so a failed backup can leave the key sitting in your scrollback.
 
-# Project location and DB identity. Override in the environment for another
-# checkout or a staging box, e.g. MONGO_PROJECT_DIR=/srv/app MONGO_DB_NAME=bms_stg
-MONGO_PROJECT_DIR="${MONGO_PROJECT_DIR:-/root/moneytek/construction_pmis}"
-MONGO_DB_NAME="${MONGO_DB_NAME:-bms}"
-MONGO_DB_USER="${MONGO_DB_USER:-BidSystemAdmin}"
+# Project location and DB identity -- set them in .bash_local
+MONGO_PROJECT_DIR="${MONGO_PROJECT_DIR:-}"
+MONGO_DB_NAME="${MONGO_DB_NAME:-}"
+MONGO_DB_USER="${MONGO_DB_USER:-}"
+MONGO_BACKUP_DIR="${MONGO_BACKUP_DIR:-$HOME/mongo-backup}"
+if [[ -z "${MONGO_SHELL:-}" ]]; then
+    if command -v mongosh &>/dev/null; then MONGO_SHELL=mongosh; else MONGO_SHELL=mongo; fi
+fi
 
 # --- Service control ---
 
-alias mongo-start='sudo systemctl start mongod'
-alias mongo-stop='sudo systemctl stop mongod'
-alias mongo-restart='sudo systemctl restart mongod'
-alias mongo-conf='sudo vi /etc/mongod.conf'
-alias mongo-log='sudo tail -f /var/log/mongodb/mongod.log'
+alias mongo-start='$SUDO systemctl start mongod'
+alias mongo-stop='$SUDO systemctl stop mongod'
+alias mongo-restart='$SUDO systemctl restart mongod'
+alias mongo-conf='$SUDO ${EDITOR:-vi} /etc/mongod.conf'
+alias mongo-log='$SUDO tail -f /var/log/mongodb/mongod.log'
+
+# @name _mongo_need_config
+# @description Internal: fail with a hint unless the project is configured.
+_mongo_need_config() {
+    [[ -n "$MONGO_PROJECT_DIR" && -n "$MONGO_DB_NAME" && -n "$MONGO_DB_USER" ]] && return 0
+    log_err "Set MONGO_PROJECT_DIR, MONGO_DB_NAME and MONGO_DB_USER (in ${ALIAS_DIR}/.bash_local)"
+    return 1
+}
 
 # @name _mongo_key
 # @description Read MONGO_DB_KEY from the project .env.local. Prints the key on
 #              stdout so callers can capture it; never echo it to the terminal.
 # @example key=$(_mongo_key) || return 1
 _mongo_key() {
+    _mongo_need_config || return 1
     local env_file="${MONGO_PROJECT_DIR}/.env.local"
     [ -f "$env_file" ] || { log_err "Not found: ${env_file}"; return 1; }
 
@@ -56,7 +69,7 @@ _mongo_key() {
 mdb() {
     local key
     key=$(_mongo_key) || return 1
-    mongo "mongodb://${MONGO_DB_USER}:${key}@127.0.0.1:27017/${MONGO_DB_NAME}" "$@"
+    "$MONGO_SHELL" "mongodb://${MONGO_DB_USER}:${key}@127.0.0.1:27017/${MONGO_DB_NAME}" "$@"
 }
 
 # @name mdb_prompt
@@ -65,7 +78,8 @@ mdb() {
 # @example mdb_prompt
 # @example mdb-prompt --quiet --eval 'db.version()'
 mdb_prompt() {
-    mongo --host 127.0.0.1 --port 27017 \
+    _mongo_need_config || return 1
+    "$MONGO_SHELL" --host 127.0.0.1 --port 27017 \
         --username "$MONGO_DB_USER" --password \
         --authenticationDatabase "$MONGO_DB_NAME" "$MONGO_DB_NAME" "$@"
 }
@@ -190,7 +204,9 @@ alias mdb-ops='mdb_ops'
 # @example mdb-migrate create add_user_index
 mdb_migrate() {
     [ -n "$1" ] || { log_err "Usage: mdb_migrate <status|up|down|create <name>>"; return 1; }
-    ( cd "$MONGO_PROJECT_DIR" && pnpm "migrate:$@" )
+    _mongo_need_config || return 1
+    local sub="$1"; shift
+    ( cd "$MONGO_PROJECT_DIR" && pnpm "migrate:${sub}" "$@" )
 }
 alias mdb-migrate='mdb_migrate'
 
@@ -202,8 +218,6 @@ alias mdb-migrate-up='mdb_migrate up'
 alias mdb-migrate-down='mdb_migrate down'
 
 # --- Backup / restore ---
-
-MONGO_BACKUP_DIR="${MONGO_BACKUP_DIR:-$HOME/mongo-backup}"
 
 # @name mdb_dump
 # @description Dump the project DB to one gzipped archive file under MONGO_BACKUP_DIR.
@@ -246,8 +260,10 @@ alias mdb-dump='mdb_dump'
 
 # @name mdb_restore
 # @description Restore the project DB from an archive produced by mdb_dump.
-# @param $1 string  Archive path
-# @param $2 string  Optional: --drop (replace instead of merge; asks to confirm) or --dry
+# @param $1 string  Archive path (default: pick from MONGO_BACKUP_DIR, newest first)
+# @param $2 string  Optional: --drop (replace instead of merge; asks you to type the
+#                   database name -- deliberately stronger than y/N, and -y cannot
+#                   skip it) or --dry
 # @remark      Without --drop this MERGES: documents whose _id already exists are
 #              skipped, not updated — so a restore over live data can silently
 #              leave a mix of old and new. --drop is usually what you actually want.
@@ -260,17 +276,25 @@ mdb_restore() {
     local key archive="$1" mode="$2" reply
     local extra_args=()
 
-    [ -n "$archive" ] || { log_err "Usage: mdb_restore <archive.gz> [--drop|--dry]"; return 1; }
     case "$archive" in
-        --*) log_err "Archive path comes first: mdb_restore <archive.gz> ${archive}"; return 1 ;;
+        --*) mode="$archive"; archive="" ;;
     esac
+    if [[ -z "$archive" ]]; then
+        ui_tty || { log_err "Usage: mdb_restore <archive.gz> [--drop|--dry]"; return 1; }
+        local -a backups
+        local pick
+        mapfile -t backups < <(ls -1t "$MONGO_BACKUP_DIR"/*.archive.gz 2>/dev/null)
+        (( ${#backups[@]} )) || { log_err "No backups in ${MONGO_BACKUP_DIR} -- give the archive path"; return 1; }
+        radioselect pick "Restore which backup into ${MONGO_DB_NAME}?" -1 "${backups[@]##*/}" || { log_info "Cancelled"; return 0; }
+        archive="${backups[$pick]}"
+    fi
     [ -f "$archive" ] || { log_err "Not found: ${archive}"; return 1; }
     key=$(_mongo_key) || return 1
 
     case "$mode" in
         --drop)
             log_warn "--drop DELETES every collection in '${MONGO_DB_NAME}' before restoring."
-            read -r -p "Type the database name to confirm: " reply
+            ask reply "Type the database name to confirm" || return 1
             [ "$reply" = "$MONGO_DB_NAME" ] || { log_err "Aborted"; return 1; }
             extra_args=(--drop)
             ;;
@@ -311,8 +335,8 @@ mdb_restore() {
     #   0 restored / 0 failed  -> --nsInclude matched nothing (archive from another DB)
     #   0 restored / N failed  -> every _id already exists; merge mode skipped them all
     local restored failed
-    restored=$(sed -nE 's/.*^0-9 document\(s\) restored successfully.*/\1/p' "$log_file" | tail -1)
-    failed=$(sed -nE 's/.*^0-9 document\(s\) failed to restore.*/\1/p' "$log_file" | tail -1)
+    restored=$(sed -nE 's/.*[^0-9]([0-9]+) document\(s\) restored successfully.*/\1/p' "$log_file" | tail -1)
+    failed=$(sed -nE 's/.*[^0-9]([0-9]+) document\(s\) failed to restore.*/\1/p' "$log_file" | tail -1)
     rm -f "$log_file"
 
     if [ "${restored:-0}" -eq 0 ]; then

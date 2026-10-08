@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# @file .bash_local.example
+# @brief Per-host settings for the runtime library -- a template, never deployed.
+# @description
+#   Copy to /etc/profile.d/.alias/.bash_local on a host and edit. That file:
+#     - is sourced FIRST by .bash_aliases, so any ${VAR:-default} in the modules picks
+#       up the values set here (variables are the main use);
+#     - is never overwritten or removed by `dotfiles shell` (the deploy keeps it);
+#     - holds what belongs to one machine or one project, not to everyone.
+#   Below: the settings of the construction_pmis work host, as an example.
+
+# --- Project dev servers (.bash_functions: run_project) ---
+RUN_PROJECT_DIR=/etc/moneytek/construction_pmis
+
+# --- MongoDB (.bash_mongo) ---
+MONGO_PROJECT_DIR=/root/moneytek/construction_pmis
+MONGO_DB_NAME=bms
+MONGO_DB_USER=BidSystemAdmin
+
+# --- Git (.bash_env) ---
+# GIT_MAIN_BRANCH=main
+# GIT_REMOTE=origin
+
+# --- Quick jumps for this host ---
+alias cdpmis='cd /etc/moneytek/construction_pmis'
+alias cduploads='cd /srv/www/bidsystem/uploads/'
+alias cdlog='cd /var/log/moneytek'

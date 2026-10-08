@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# @file .bash_prompt
+# @brief The interactive prompt: [user(group)@host:ip dir (branch hash status)]$
+# @description
+#   styled wraps STYLE codes in \[...\] so bash counts the prompt's width right;
+#   git_prompt renders the branch segment; build_ps1 assembles PS1 before every
+#   prompt; prompt_enable hooks it into PROMPT_COMMAND. The entry point calls
+#   prompt_enable for interactive shells only.
+#   Depends on .bash_env (STYLE) and, at prompt time, get_ip (.bash_functions).
+
+# @name styled
+# @description Wrap text in STYLE codes for PS1. Each code is enclosed in \[...\] so
+#              bash leaves it out of the prompt width -- for prompt strings only; plain
+#              output uses the raw STYLE codes.
+# @param -t  | --text        string  Text to style (default: "")
+# @param -fg | --foreground  string  Foreground STYLE key (default: fg_white)
+# @param -bg | --background  string  Background STYLE key (default: none)
+# @param -st | --style       string  Font-style STYLE key (default: none)
+# @example styled -t "\u" -fg fg_yellow -st bold
+styled() {
+    local text="" fg="${STYLE[fg_white]}" bg="" st=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -t  | --text)       text="$2";         shift 2 ;;
+            -fg | --foreground) fg="${STYLE[$2]}"; shift 2 ;;
+            -bg | --background) bg="${STYLE[$2]}"; shift 2 ;;
+            -st | --style)      st="${STYLE[$2]}"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    local codes=""
+    [[ -n "$st" ]] && codes+="\[${st}\]"
+    [[ -n "$bg" ]] && codes+="\[${bg}\]"
+    [[ -n "$fg" ]] && codes+="\[${fg}\]"
+    echo "${codes}${text}\[${STYLE[reset]}\]"
+}
+
+# @name git_prompt
+# @description Branch and status segment of the prompt; prints nothing outside a repo.
+#              ✔ clean · ● unstaged · ✚ staged · ✖ conflicts · ? untracked · ⚑ stash
+#              ↑n ahead · ↓n behind · ⇕ diverged. A detached HEAD shows the remote
+#              branch pointing at it, else detached:<hash>; REBASE / MERGE when one
+#              is in progress.
+# @example git_prompt   # -> (main a1b2c3 ✔)
+git_prompt() {
+    command -v git >/dev/null 2>&1 || return 0
+    local git_dir
+    git_dir=$(git rev-parse --git-dir 2>/dev/null) || return 0
+
+    local branch hash symbols=""
+    hash=$(git rev-parse --short=6 HEAD 2>/dev/null) || hash="unknown"
+
+    if ! branch=$(git symbolic-ref --short HEAD 2>/dev/null); then
+        local remote_branch
+        remote_branch=$(git branch -r --points-at HEAD 2>/dev/null | grep -v '\->' | sed 's/^ *//' | head -n1)
+        branch="${remote_branch:-detached:$hash}"
+    fi
+
+    if [[ -d "$git_dir/rebase-merge" || -d "$git_dir/rebase-apply" ]]; then
+        branch+="|REBASE"
+    elif [[ -f "$git_dir/MERGE_HEAD" ]]; then
+        branch+="|MERGE"
+    fi
+
+    local status
+    status=$(git status --porcelain=v1 2>/dev/null) || return 0
+    grep -qE '^[MARCD].' <<< "$status" && symbols+="✚"
+    grep -qE '^.[MD]' <<< "$status" && symbols+="●"
+    grep -qE '^(UU|AA|DD|AU|UA|DU|UD)' <<< "$status" && symbols+="✖"
+    grep -qE '^\?\?' <<< "$status" && symbols+="?"
+
+    local ahead behind
+    ahead=$(git rev-list --count '@{u}..HEAD' 2>/dev/null) || ahead=0
+    behind=$(git rev-list --count 'HEAD..@{u}' 2>/dev/null) || behind=0
+    if (( ahead > 0 && behind > 0 )); then
+        symbols+="⇕${ahead}↑${behind}↓"
+    elif (( ahead > 0 )); then
+        symbols+=$(styled -t "↑${ahead}" -fg fg_bright_green)
+    elif (( behind > 0 )); then
+        symbols+=$(styled -t "↓${behind}" -fg fg_bright_red)
+    fi
+
+    git rev-parse --verify --quiet refs/stash >/dev/null && symbols+="⚑"
+    [[ -z "$symbols" ]] && symbols=$(styled -t "✔" -fg fg_bright_green)
+
+    branch=$(styled -t "$branch" -fg fg_bright_white -bg bg_yellow -st bold)
+    hash=$(styled -t "$hash" -fg fg_yellow -st bold)
+    echo "(${branch} ${hash} ${symbols})"
+}
+alias git-prompt='git_prompt'
+
+# @name build_ps1
+# @description Set PS1 to [user(group)@host:ip dir (git)]$ -- # in red for root.
+#              Runs before every prompt (PROMPT_COMMAND, see prompt_enable).
+#              PS1 escapes: \u user · \h short host · \W last dir component · \w full.
+# @example build_ps1   # sets PS1 for the current shell once
+build_ps1() {
+    local user group host path ip git symbol
+    user=$(styled -t '\u' -fg fg_yellow -st bold)
+    group=$(styled -t "$(id -gn)" -fg fg_bright_yellow)
+    host=$(styled -t '\h' -fg fg_bright_white -st dim)
+    path=$(styled -t '\W' -fg fg_bright_white)
+    ip=$(get_ip 2>/dev/null)
+    [[ -n "$ip" ]] && ip=$(styled -t "$ip" -fg fg_bright_white -bg bg_yellow -st bold)
+    git=$(git_prompt)
+    if (( EUID == 0 )); then
+        symbol=$(styled -t '#' -fg fg_bright_red -st bold)
+    else
+        symbol=$(styled -t '\$' -fg fg_bright_white -st bold)
+    fi
+    PS1="[${user}(${group})@${host}:${ip} ${path}${git:+ ${git}}]${symbol} "
+}
+
+# @name prompt_enable
+# @description Run build_ps1 before every prompt, ahead of whatever PROMPT_COMMAND
+#              already holds (RHEL's /etc/bashrc sets one for the terminal title) --
+#              prepended, not overwritten, and only once however often the library
+#              is re-sourced.
+# @example prompt_enable
+prompt_enable() {
+    case ";${PROMPT_COMMAND:-};" in
+        *";build_ps1;"*) return 0 ;;
+    esac
+    PROMPT_COMMAND="build_ps1${PROMPT_COMMAND:+;${PROMPT_COMMAND}}"
+}
