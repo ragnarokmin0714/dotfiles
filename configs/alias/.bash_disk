@@ -1,0 +1,479 @@
+# =========================
+# --- Disk ---
+# =========================
+#
+# Inspect, clean up and grow disk space on Rocky Linux and Ubuntu, under any
+# hypervisor: disk_status and disk_usage_top report, clean_up_disk frees space,
+# disk_grow grows. Volumes only ever grow -- nothing here shrinks, removes or
+# creates one. XFS (Rocky's default) cannot shrink, and carving out a new volume
+# means editing /etc/fstab, where a mistake drops the host into emergency mode on
+# the next boot. Those stay manual, one step at a time.
+#
+# TODO: Only Rocky 9 / VirtualBox / MBR / LVM / XFS has run for real. The Ubuntu,
+# GPT, ext4, no-LVM and NVMe paths have only run against stubbed commands. Remove
+# this note once disk_grow has grown one Ubuntu host (GPT + ext4) and one cloud
+# image without LVM; review by 2027-01-06.
+
+# @name _disk_tail
+# @description Internal: echo "<partition-number> <bytes>" -- the disk's last partition
+#              and the unallocated space after it. Prints nothing when the disk has no
+#              partitions. Reads sysfs, whose sizes are always 512-byte sectors whatever
+#              the disk's sector size, so it needs no root.
+# @param $1 string  Disk path, e.g. /dev/sda
+_disk_tail() {
+    local name=${1##*/} p e end=0 last=""
+    for p in /sys/block/"$name"/"$name"*; do
+        [[ -f "$p/partition" ]] || continue
+        e=$(( $(< "$p/start") + $(< "$p/size") ))
+        (( e > end )) && { end=$e; last=$(< "$p/partition"); }
+    done
+    [[ -n "$last" ]] && echo "$last $(( ($(< "/sys/block/${name}/size") - end) * 512 ))"
+}
+
+# @name _disk_fs_short
+# @description Internal: succeed when a filesystem is clearly smaller than its device,
+#              i.e. the device was grown but the filesystem never was. A 1 GiB gap alone
+#              is not enough: ext4 reports its size net of inode tables and journal,
+#              which scale with the device. XFS measured only 10-17 MiB short here.
+# @param $1 int  Filesystem size in bytes
+# @param $2 int  Device size in bytes
+_disk_fs_short() {
+    (( $2 - $1 >= 1024 ** 3 && $1 * 10 < $2 * 9 ))
+}
+
+# @name _disk_grow_hints
+# @description Internal: print one "<where>: <state> -> <command>" line for each layer
+#              of the grow chain disk -> partition -> PV -> VG -> filesystem that still
+#              holds space the next layer up has not taken:
+#                unallocated after last partition -> growpart
+#                PV smaller than its device       -> pvresize
+#                VG has free extents              -> lvextend -r
+#                filesystem smaller than device   -> xfs_growfs / resize2fs
+#              Partition and filesystem checks read sysfs / findmnt and need no root.
+#              Detection for disk_status.
+# @param $1 string  LVM state from disk_status; PV/VG checks run only on "present"
+_disk_grow_hints() {
+    local lvm="$1"
+    local gib=$((1024 ** 3))
+    local disk last tail note=""
+    command -v growpart &>/dev/null || note=" (not installed -- or let disk_grow --parted do it)"
+
+    while read -r disk; do
+        read -r last tail < <(_disk_tail "$disk")
+        (( ${tail:-0} >= gib )) || continue
+        echo "${disk}: $(( tail / gib )) GiB unallocated after partition ${last} -> sudo growpart ${disk} ${last}${note}"
+    done < <(lsblk -dnpo NAME,TYPE | awk '$2 == "disk" {print $1}')
+
+    if [[ "$lvm" == present ]]; then
+        local pv dev_size pv_size vg vfree
+        while read -r pv dev_size pv_size; do
+            (( dev_size - pv_size >= gib )) && echo "${pv}: PV smaller than its device -> sudo pvresize ${pv}"
+        done < <(sudo pvs --noheadings --units b --nosuffix -o pv_name,dev_size,pv_size)
+        while read -r vg vfree; do
+            (( vfree >= gib )) && echo "VG ${vg}: $(( vfree / gib )) GiB free -> sudo lvextend -r -l +100%FREE /dev/${vg}/<lv>"
+        done < <(sudo vgs --noheadings --units b --nosuffix -o vg_name,vg_free)
+    fi
+
+    # Bind mounts carry "dev[/path]" as SOURCE, which lsblk rejects -> skipped
+    local src size fstype target dev grow
+    while read -r src size fstype target; do
+        dev=$(lsblk -bdno SIZE "$src" 2>/dev/null) || continue
+        _disk_fs_short "$size" "$dev" || continue
+        case "$fstype" in
+            xfs) grow="xfs_growfs ${target}" ;;
+            *)   grow="resize2fs ${src}" ;;
+        esac
+        echo "${target}: $(( size / gib )) GiB filesystem on a $(( dev / gib )) GiB device -> sudo ${grow}"
+    done < <(findmnt -rnbo SOURCE,SIZE,FSTYPE,TARGET -t xfs,ext4,ext3,ext2)
+}
+
+# @name disk_status
+# @description Read-only disk overview: block-device tree, filesystem usage and LVM
+#              free space. Ends with the next command to run when a disk grown in the
+#              hypervisor still has space nobody owns (see _disk_grow_hints for the
+#              chain it walks). No parted partition table: lsblk already lists the
+#              partitions, and space left after them is reported under Next steps.
+#              Portable across Rocky Linux 8+ and Ubuntu 20.04+: falls back to the
+#              singular MOUNTPOINT column on util-linux < 2.37, hides snap loop
+#              devices and squashfs/overlay mounts, and skips LVM when lvm2 is
+#              absent. Only LVM needs root: non-root users are asked for sudo once,
+#              and without it just the LVM section is skipped.
+# @depends lsblk, df, findmnt, sudo, _disk_grow_hints; lvm2 optional
+# @example disk_status
+# @example ds
+disk_status() {
+    log_head "Disk Status"
+    echo ""
+
+    local mnt_col=MOUNTPOINTS
+    lsblk -o MOUNTPOINTS >/dev/null 2>&1 || mnt_col=MOUNTPOINT
+    log_step "Block devices:"
+    # major 7 = loop (one per snap on Ubuntu), 11 = optical drive
+    lsblk -e 7,11 -o "NAME,SIZE,TYPE,FSTYPE,${mnt_col}"
+    echo ""
+
+    log_step "Filesystem usage:"
+    df -hT -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs
+    echo ""
+
+    # pvs/vgs take the lock in /run/lock/lvm, so this is the only part that
+    # needs root; lsblk, df, findmnt and sysfs work as any user
+    log_step "LVM:"
+    local lvm=present pv_table
+    if ! command -v pvs &>/dev/null; then
+        lvm=absent
+        log_info "lvm2 not installed -- skipped"
+    elif (( EUID != 0 )) && ! sudo -v; then
+        lvm=unchecked
+        log_warn "Skipped -- needs root"
+    else
+        # pvs prints nothing (exit 0) when there are no PVs
+        pv_table=$(sudo pvs -o +dev_size)
+        if [[ -z "$pv_table" ]]; then
+            lvm=absent
+            log_info "No LVM physical volumes"
+        else
+            echo "$pv_table"
+            echo ""
+            sudo vgs
+        fi
+    fi
+    echo ""
+
+    log_step "Next steps:"
+    local -a hints
+    mapfile -t hints < <(_disk_grow_hints "$lvm")
+    local h
+    for h in "${hints[@]}"; do log_warn "$h"; done
+    [[ "$lvm" == unchecked ]] && log_warn "PV/VG not checked -- needs root"
+    if (( ${#hints[@]} )); then
+        log_info "Or let disk_grow walk them, asking before each one"
+    else
+        log_ok "No unallocated space"
+        log_info "Grew the disk in the hypervisor but the size above did not change? SCSI disks need a rescan: echo 1 | sudo tee /sys/class/block/<disk>/device/rescan"
+    fi
+}
+alias disk-status='disk_status'
+alias ds='disk_status'
+
+# @name disk_usage_top
+# @description Display disk usage for a given path (default: $HOME),
+#              showing top N largest entries (default: 20). Stays on the path's own
+#              filesystem (du -x): without it `dut /` also walks /proc, /sys, /home and
+#              /boot, counting space that is not on / at all -- on this host it ran
+#              past 2 minutes, against 54 s with -x (2026-10-06).
+# @param $1 string Optional path to check, default is $HOME
+# @param $2 int Optional number of entries to show, default is 20
+# @example disk_usage_top
+# @example disk_usage_top /var
+# @example disk_usage_top /var 10
+disk_usage_top() {
+    local target="${1:-$HOME}"
+    local count="${2:-20}"
+    du -xh --max-depth=1 "$target" | sort -hr | head -n "$count"
+}
+alias disk-usage-top='disk_usage_top'
+alias dut='disk_usage_top'
+
+# @name clean_up_disk
+# @description Perform comprehensive disk cleanup:
+#              - Clean npm & pnpm caches
+#              - Clean the package manager cache (apt or dnf, via _pkg_manager)
+#              - Remove unused dependencies and old kernels: apt autoremove covers
+#                both on Ubuntu; dnf needs a separate remove --oldinstallonly
+#              - (Optional) vacuum system logs
+#              sys_maintain calls this, and on hosts set up with
+#              /usr/local/sbin/sys-maint.sh that runs from cron -- keep every step
+#              non-interactive (-y), or the cron run hangs.
+# @depends _pkg_manager
+# @example clean_up_disk
+clean_up_disk() {
+    local mgr
+    mgr=$(_pkg_manager) || { log_err "No supported package manager found (apt/dnf)"; return 1; }
+
+    log_info "Cleaning npm cache..."
+    npm cache clean --force
+
+    log_info "Cleaning pnpm cache..."
+    pnpm store prune
+
+    log_info "Cleaning package manager cache (${mgr})..."
+    case "$mgr" in
+        apt)
+            sudo apt clean
+            log_info "Removing unused dependencies and old kernels..."
+            sudo apt autoremove -y
+            ;;
+        dnf)
+            sudo dnf clean all
+            log_info "Removing unused dependencies..."
+            sudo dnf autoremove -y
+            log_info "Removing old kernels..."
+            sudo dnf remove --oldinstallonly -y
+            ;;
+    esac
+
+#    log_info "Vacuuming system logs..."
+#    sudo journalctl --vacuum-size=500M
+
+    log_ok "Disk cleanup completed"
+    df -h
+}
+alias clean-up-disk='clean_up_disk'
+alias cud='clean_up_disk'
+
+# @name _disk_grow_plan
+# @description Internal: work out how to grow the filesystem mounted at $1. Prints the
+#              room it can gain (bytes) on the first line, then the commands to run
+#              with sudo, one per line, in order:
+#                growpart <disk> <n>                unallocated space follows its partition
+#                pvresize <pv>                      LVM: the PV takes that space
+#                lvextend -r -l +100%FREE <lv>      LVM: or -L +<size>; -r grows the fs too
+#                xfs_growfs <mp> | resize2fs <dev>  no LVM, or LV grown earlier without -r
+#              Only the room line when there is nothing worth growing (< 1 GiB).
+#              Accepts exactly four layouts, read upward from the mount with lsblk -s:
+#              lvm>part>disk, lvm>disk, part>disk and disk. Anything else -- LUKS, RAID,
+#              an LV spanning disks -- is refused rather than guessed at. PV/LV queries
+#              need root.
+# @param $1 string  Mount point
+# @param $2 string  Optional amount for lvextend -L +<size>, e.g. 40G (LVM only)
+# @returns 0 with the plan on stdout; 1 with the reason on stderr
+_disk_grow_plan() {
+    local mp="$1" size="$2" gib=$((1024 ** 3))
+    local src fs_size fstype
+    read -r src fs_size fstype < <(findmnt -nbo SOURCE,SIZE,FSTYPE --mountpoint "$mp")
+    [[ -n "$src" ]] || { log_err "${mp}: not a mount point"; return 1; }
+    case "$fstype" in
+        xfs | ext2 | ext3 | ext4) ;;
+        *) log_err "${mp}: ${fstype} is not supported (xfs, ext2-4)"; return 1 ;;
+    esac
+
+    local -a names types
+    local n t
+    while read -r n t; do names+=("$n"); types+=("$t"); done < <(lsblk -s -nrpo NAME,TYPE "$src" 2>/dev/null)
+    case "${types[*]}" in
+        "lvm part disk" | "lvm disk" | "part disk" | "disk") ;;
+        *) log_err "${mp}: layout '${types[*]:-unknown}' is not supported -- grow it by hand"; return 1 ;;
+    esac
+
+    local disk="${names[-1]}" part="" partnum last tail=0
+    local -a steps=()
+    local room=0
+    case "${types[*]}" in
+        "lvm part disk" | "part disk") part="${names[-2]}" ;;
+    esac
+    if [[ -n "$part" ]]; then
+        # The kernel names partitions <disk><n> or <disk>p<n>: trailing digits = n
+        partnum=${part##*[!0-9]}
+        # A logical partition lives inside the extended one, which would have to
+        # grow first; that is not planned here
+        if [[ "$(lsblk -dno PTTYPE "$disk")" == dos ]] && (( partnum >= 5 )); then
+            log_err "${mp}: ${part} is an MBR logical partition -- grow it by hand"
+            return 1
+        fi
+        read -r last tail < <(_disk_tail "$disk")
+        # Free space behind some other partition is not reachable from this one
+        [[ "$last" == "$partnum" ]] || tail=0
+        (( ${tail:-0} >= gib )) && { steps+=("growpart ${disk} ${partnum}"); room=$tail; }
+    fi
+
+    local grows_fs=0
+    if [[ "${types[0]}" == lvm ]]; then
+        local pv="${names[1]}" lv dev_size pv_size vg_free pv_gap
+        read -r dev_size pv_size vg_free < <(sudo pvs --noheadings --units b --nosuffix -o dev_size,pv_size,vg_free "$pv")
+        read -r lv < <(sudo lvs --noheadings -o lv_path "$src")
+        pv_gap=$(( dev_size - pv_size ))
+        (( pv_gap >= gib )) || pv_gap=0
+        (( ${#steps[@]} || pv_gap )) && steps+=("pvresize ${pv}")
+        room=$(( room + pv_gap + vg_free ))
+        if (( room >= gib )); then
+            if [[ -n "$size" ]]; then
+                steps+=("lvextend -r -L +${size} ${lv}")
+            else
+                steps+=("lvextend -r -l +100%FREE ${lv}")
+            fi
+            grows_fs=1
+        fi
+    elif [[ -n "$size" ]]; then
+        log_err "${mp}: a size only applies to LVM -- a plain partition grows to the end of its disk"
+        return 1
+    fi
+
+    if (( ! grows_fs )); then
+        local dev_bytes
+        dev_bytes=$(lsblk -bdno SIZE "$src")
+        if _disk_fs_short "$fs_size" "$dev_bytes"; then
+            room=$(( room + dev_bytes - fs_size ))
+        elif (( ! ${#steps[@]} )); then
+            echo "$room"
+            return 0
+        fi
+        case "$fstype" in
+            xfs) steps+=("xfs_growfs ${mp}") ;;
+            *)   steps+=("resize2fs ${src}") ;;
+        esac
+    fi
+
+    echo "$room"
+    printf '%s\n' "${steps[@]}"
+}
+
+# @name _disk_grow_run
+# @description Internal: run disk_grow's planned steps in order, each with sudo.
+#              growpart is installed first through pkg_ensure if missing (Ubuntu:
+#              cloud-guest-utils, Rocky: cloud-utils-growpart from AppStream), then
+#              dry-run, since it rewrites the partition table; parted has no dry run
+#              and asks its own questions, so it gets a note instead. Unless $1 is 1,
+#              each step waits for y and anything else stops before it -- safe, since
+#              every step leaves the system consistent and disk_status shows where it
+#              stands.
+# @param $1   int     1 to skip the per-step y/N (disk_grow -y)
+# @param $2.. string  Steps, one full command per argument, without sudo
+# @returns 0 when every step ran; 1 when stopped, refused or failed
+_disk_grow_run() {
+    local yes="$1"; shift
+    local step answer
+    local -a argv
+    for step in "$@"; do
+        read -ra argv <<< "$step"
+        if [[ "${argv[0]}" == growpart ]]; then
+            if ! command -v growpart &>/dev/null; then
+                case "$(_pkg_manager)" in
+                    apt) pkg_ensure -m apt -p cloud-guest-utils ;;
+                    dnf) pkg_ensure -m dnf -p cloud-utils-growpart ;;
+                esac
+                command -v growpart &>/dev/null || { log_err "growpart is required -- nothing changed (or rerun with --parted)"; return 1; }
+            fi
+            sudo growpart --dry-run "${argv[@]:1}" || { log_err "growpart dry run failed -- nothing changed"; return 1; }
+        elif [[ "${argv[0]}" == parted ]]; then
+            log_info "parted has no dry run and asks its own questions: Yes if the partition is in use, Fix if offered"
+        fi
+        if (( yes )); then
+            log_step "Running: sudo ${step}"
+        else
+            read -rp "Run: sudo ${step} ? (y/N): " answer
+            [[ "${answer,,}" == y ]] || { log_warn "Stopped before: sudo ${step} -- disk_status shows where it stands"; return 1; }
+        fi
+        sudo "${argv[@]}" || { log_err "Failed: sudo ${step}"; return 1; }
+    done
+}
+
+# @name disk_grow
+# @description Grow a mounted filesystem into space nobody uses yet. Rescans SCSI
+#              disks first so the kernel sees a size changed in the hypervisor, then
+#              plans growpart -> pvresize -> lvextend -r (or xfs_growfs / resize2fs
+#              without LVM), shows the plan, and runs it step by step, asking y/N
+#              before each (see _disk_grow_run). A size larger than the space on offer
+#              is refused before anything changes, rather than after the partition
+#              table was already rewritten. With no arguments it offers the mount
+#              points that can grow (/ preselected), asks how much to add, and prints
+#              the equivalent one-line command for next time.
+#              --parted grows the partition with parted, which every Rocky/Ubuntu
+#              install has, instead of growpart (which may need installing). parted
+#              asks its own questions: Yes when the partition is in use, Fix if it
+#              offers to fix a GPT whose backup header sits before the new disk end.
+#              -y skips disk_grow's own y/N before each step; the plan is still shown
+#              first, and parted's questions and the growpart install prompt still ask
+#              (installing software is a separate decision). Needs a terminal even
+#              with -y: -y is for someone at the keyboard who has read the plan, not
+#              for cron, and parted may still need an answer.
+#              -n shows the plan and stops, changing nothing; it wins over -y, so
+#              `-n` then `-y` is a preview-then-run pair. With a mount point given
+#              it needs no terminal, so it can also go into a script or a log.
+# @param -n|--dry-run  Optional, anywhere: show the plan only, change nothing
+# @param -y|--yes      Optional, anywhere: run every step without asking y/N
+# @param --parted     Optional, anywhere: use parted rather than growpart for the partition
+#                      (no -p: across these modules -p means --package, see .bash_aliases)
+# @param -h|--help     Print usage and exit
+# @param $1 string  Optional mount point, always first (default: pick from a menu)
+# @param $2 string  Optional amount to add on LVM, e.g. 40G (default: all free space)
+# @depends _disk_grow_plan, _disk_grow_run, radioselect, sudo
+# @example disk_grow                  # menu
+# @example disk_grow /                # all free space to /
+# @example disk_grow / 40G            # 40G to /, the rest stays in the VG for later
+# @example disk_grow --parted /       # all free space to /, without installing growpart
+# @example disk_grow --parted / 40G   # 40G to /, without installing growpart
+# @example disk_grow /home 10G        # any LVM mount works; it shares the VG's free space with /
+# @example disk_grow -y --parted /    # all free space to /, no y/N per step
+# @example disk_grow -n /             # preview the plan for /, change nothing
+disk_grow() {
+    local mp="" size="" use_parted=0 yes=0 dry=0 opts="" arg gib=$((1024 ** 3))
+    local usage="usage: disk_grow [-n] [-y] [--parted] [mount-point [size]]"
+    for arg in "$@"; do
+        case "$arg" in
+            --parted) use_parted=1; opts+="--parted " ;;
+            -y | --yes) yes=1; opts+="-y " ;;
+            -n | --dry-run) dry=1; opts+="-n " ;;
+            -h | --help)
+                printf '%s\n' "$usage" "  -n, --dry-run   show the plan, change nothing (wins over -y)" \
+                    "  -y, --yes       no y/N before each step (parted may still ask)" \
+                    "      --parted    grow the partition with parted, not growpart" \
+                    "  e.g. disk_grow -n --parted /   then   disk_grow -y --parted / 40G"
+                return 0 ;;
+            -*) log_err "Unknown option: ${arg} -- see disk_grow -h"; return 1 ;;
+            *)
+                if [[ -z "$mp" ]]; then mp=$arg
+                elif [[ -z "$size" ]]; then size=$arg
+                else log_err "Too many arguments: ${arg} -- ${usage}"; return 1
+                fi ;;
+        esac
+    done
+    [[ -z "$mp" || "$mp" == /* ]] || { log_err "${mp}: not a mount point -- the mount point comes first, e.g. disk_grow / ${mp}"; return 1; }
+    [[ -t 0 || ( "$dry" == 1 && -n "$mp" ) ]] || { log_err "disk_grow needs a terminal (the menu, y/N and parted may ask) -- run it from one"; return 1; }
+    (( EUID == 0 )) || sudo -v || { log_err "disk_grow needs root"; return 1; }
+
+    # Only SCSI disks (VMware, Hyper-V, VirtualBox) need this to notice a resize;
+    # virtio and NVMe report it on their own
+    local disk
+    while read -r disk; do
+        [[ -e "/sys/block/${disk}/device/rescan" ]] && echo 1 | sudo tee "/sys/block/${disk}/device/rescan" >/dev/null
+    done < <(lsblk -dno NAME,TYPE | awk '$2 == "disk" {print $1}')
+
+    local plan
+    if [[ -z "$mp" ]]; then
+        local -a mps labels
+        local m cur=0 pick
+        while read -r m; do
+            plan=$(_disk_grow_plan "$m" 2>/dev/null) || continue
+            [[ "$plan" == *$'\n'* ]] || continue
+            [[ "$m" == / ]] && cur=${#mps[@]}
+            mps+=("$m")
+            labels+=("$(printf '%-16s +%d GiB' "$m" $(( ${plan%%$'\n'*} / gib )))")
+        done < <(findmnt -rno TARGET -t xfs,ext4,ext3,ext2)
+        case ${#mps[@]} in
+            0) log_ok "Nothing to grow -- lsblk shows the disk size the kernel sees"; return 0 ;;
+            1) mp=${mps[0]}; log_info "Only ${mp} can grow" ;;
+            *) radioselect pick "Grow which mount point?" "$cur" "${labels[@]}" || return 1
+               mp=${mps[$pick]} ;;
+        esac
+        if [[ "$(_disk_grow_plan "$mp")" == *lvextend* ]]; then
+            read -rp "Size to add to ${mp} (e.g. 40G) [all]: " size
+        fi
+        log_info "Same as: disk_grow ${opts}${mp}${size:+ ${size}}"
+    fi
+    [[ -z "$size" || "$size" =~ ^[0-9]+[MGTmgt]$ ]] || { log_err "Size must look like 512M, 40G or 1T"; return 1; }
+
+    plan=$(_disk_grow_plan "$mp" "$size") || return 1
+    [[ "$plan" == *$'\n'* ]] || { log_ok "${mp}: nothing to grow"; return 0; }
+    local room=${plan%%$'\n'*} pow
+    # Strictly less: LVM keeps a few MiB of the room for metadata, so asking for
+    # all of it fails at lvextend -- after the partition was already grown
+    if [[ -n "$size" ]]; then
+        case ${size: -1} in [Mm]) pow=2 ;; [Gg]) pow=3 ;; [Tt]) pow=4 ;; esac
+        (( ${size%?} * 1024 ** pow < room )) || { log_err "Only $(( room / gib )) GiB available for ${mp} -- ask for less, or leave the size out to give it all"; return 1; }
+    fi
+    (( use_parted )) && plan=$(sed -E 's/^growpart (\S+) ([0-9]+)$/parted \1 resizepart \2 100%/' <<< "$plan")
+    local -a steps
+    mapfile -t steps <<< "${plan#*$'\n'}"
+    log_step "Plan for ${mp} (up to +$(( room / gib )) GiB):"
+    printf '  sudo %s\n' "${steps[@]}"
+    echo ""
+    (( dry )) && { log_info "Dry run -- nothing changed"; return 0; }
+
+    _disk_grow_run "$yes" "${steps[@]}" || return 1
+    echo ""
+    log_ok "${mp} grown"
+    df -hT "$mp"
+}
+alias disk-grow='disk_grow'
+alias dg='disk_grow'

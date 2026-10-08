@@ -1,49 +1,51 @@
-#!/usr/bin/env bash
-# @file .bash_aliases
-# @brief Shell alias entry point — sources all alias modules.
-# @description
-#   This is the single file sourced by ~/.bashrc (or /etc/bashrc).
-#   It loads all alias/function modules in order:
-#     1. .bash_env       → ANSI STYLE map, styled(), git_prompt(), build_ps1()
-#     2. .bash_git       → Git aliases and interactive branch functions
-#     3. .bash_functions → System, disk, and project utility functions
-#
-#   To add a new module, create a new file under ~/.alias/ and add a
-#   source line below.
-#
-# SOURCED BY: ~/.bashrc via:
-#   [ -f ~/.alias/.bash_aliases ] && source ~/.alias/.bash_aliases
-#   PROMPT_COMMAND=build_ps1
+#[ -f ~/.alias/.bash_env ] && source ~/.alias/.bash_env
+#[ -f ~/.alias/.bash_git ] && source ~/.alias/.bash_git
+[ -f /etc/profile.d/.alias/.bash_env ] && source /etc/profile.d/.alias/.bash_env
+[ -f /etc/profile.d/.alias/.bash_git ] && source /etc/profile.d/.alias/.bash_git
+[ -f /etc/profile.d/.alias/.bash_functions ] && source /etc/profile.d/.alias/.bash_functions
+[ -f /etc/profile.d/.alias/.bash_pkg ] && source /etc/profile.d/.alias/.bash_pkg
+[ -f /etc/profile.d/.alias/.bash_disk ] && source /etc/profile.d/.alias/.bash_disk
+[ -f /etc/profile.d/.alias/.bash_nginx ] && source /etc/profile.d/.alias/.bash_nginx
+[ -f /etc/profile.d/.alias/.bash_mongo ] && source /etc/profile.d/.alias/.bash_mongo
+[ -f /etc/profile.d/.alias/.bash_nvm ] && source /etc/profile.d/.alias/.bash_nvm
 
-# Determine the directory where this file lives (supports symlinks)
-_ALIAS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-# Load environment constants, STYLE map, and prompt builder
-[ -f "$_ALIAS_DIR/.bash_env" ]       && source "$_ALIAS_DIR/.bash_env"
-
-# Load Git aliases and interactive branch functions
-[ -f "$_ALIAS_DIR/.bash_git" ]       && source "$_ALIAS_DIR/.bash_git"
-
-# Load general system/disk/project utilities
-[ -f "$_ALIAS_DIR/.bash_functions" ] && source "$_ALIAS_DIR/.bash_functions"
-
-unset _ALIAS_DIR
-
-# =============================================================================
-# --- Quick Reference (add your own one-liners below) ---
-# =============================================================================
+# Option letters across these modules: a letter keeps one meaning everywhere, so
+# habits carry over between functions. Check this list before adding an option.
+#   -n, --dry-run   show what would happen, change nothing  (git_clean_merged, disk_grow)
+#   -y, --yes       skip the confirmation prompts           (pkg_ensure, pkg_remove, disk_grow)
+#   -h, --help      print usage                             (disk_grow)
+#   -p, --package   package name, takes a value             (pkg_installed, pkg_ensure, pkg_remove)
+#   -m, --manager   package manager, takes a value          (pkg_installed, pkg_ensure, pkg_remove)
+#   -g, --global    global install                          (pkg_installed, pkg_ensure, pkg_remove)
+#   -s, --search    search instead of the exact name        (pkg_installed, pkg_ensure, pkg_remove)
+# Older exceptions, kept so existing habits still work: pkg_unused -s is
+# --min-size, sys_toolkit -m is --menu. Don't add new ones.
 
 # ~/.bashrc & source ~/.bashrc
-# Documentation style: shdoc (https://github.com/reconquest/shdoc)
+# Documentation style: shdoc
+# === Command Line / Vim / sed Examples ===
 
 # --- sed Examples ---
-# Delete lines 10–20 and line 24:       sed '10,20d;24d' file.txt
-# Delete lines 27–143:                  sed '27,143d' file.txt
+# Delete lines 10–20 and line 24
+#   `sed '10,20d;24d' file.txt`
+# Delete lines 27–142 and line 143
+#   `sed '27,142d;143d' file.txt`
 
 # --- Vim Examples ---
-# Delete all lines:                     :%d
-# Delete range:                         :10,20d
-# Show line numbers:                    :set number
-# Search & replace (range, confirm):    :50,100s/from/to/gc
-# Search & replace (whole file):        :%s/from/to/gc
-# Syntax highlighting on/off:           :syntax on / :syntax off
+# Delete lines:
+#   `:%d`           # delete all lines
+#   `:10,20d`       # delete lines 10–20
+#   `:27,143d`      # delete lines 27–143
+# Delete single line:
+#   `:49d`          # line 49
+# Line numbers:
+#   `:set number`        # temporarily show
+#   `:set nonumber`      # disable
+#   `:set relativenumber`# show relative
+# Search & replace:
+#   `:50,100s/search_from/replace_to/gc`  # range, confirm each
+#   `:%s/search_from/replace_to/gc`       # entire file, confirm each
+#   `:s/search_from/replace_to/gc`        # current line, confirm each
+# Syntax highlighting commands (Vim only):
+#    - [x] :syntax on
+#    - [x] :syntax off

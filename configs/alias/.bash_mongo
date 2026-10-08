@@ -1,0 +1,373 @@
+# =========================
+# --- MongoDB ---
+# =========================
+#
+# Schema/data changes for this project go through migrate-mongo, never by hand
+# (see .claude/CLAUDE.md rule 6). This file therefore provides read/observe,
+# backup, and migrate-mongo wrappers only — no drop/update shortcuts.
+#
+# Note: the installed client is the legacy `mongo` shell (v4.4), not `mongosh`.
+#
+# Credential exposure: these helpers build a mongodb:// URI containing the password.
+# mongodump/mongorestore echo that whole URI — password included — in their connection
+# error messages, so a failed backup can leave the key sitting in your scrollback.
+
+# Project location and DB identity. Override in the environment for another
+# checkout or a staging box, e.g. MONGO_PROJECT_DIR=/srv/app MONGO_DB_NAME=bms_stg
+MONGO_PROJECT_DIR="${MONGO_PROJECT_DIR:-/root/moneytek/construction_pmis}"
+MONGO_DB_NAME="${MONGO_DB_NAME:-bms}"
+MONGO_DB_USER="${MONGO_DB_USER:-BidSystemAdmin}"
+
+# --- Service control ---
+
+alias mongo-start='sudo systemctl start mongod'
+alias mongo-stop='sudo systemctl stop mongod'
+alias mongo-restart='sudo systemctl restart mongod'
+alias mongo-conf='sudo vi /etc/mongod.conf'
+alias mongo-log='sudo tail -f /var/log/mongodb/mongod.log'
+
+# @name _mongo_key
+# @description Read MONGO_DB_KEY from the project .env.local. Prints the key on
+#              stdout so callers can capture it; never echo it to the terminal.
+# @example key=$(_mongo_key) || return 1
+_mongo_key() {
+    local env_file="${MONGO_PROJECT_DIR}/.env.local"
+    [ -f "$env_file" ] || { log_err "Not found: ${env_file}"; return 1; }
+
+    # Strip only a trailing CR and *surrounding* quotes. A blanket `tr -d "\"' "` also
+    # deletes spaces and quotes from inside the value, silently corrupting any password
+    # that legitimately contains them — the failure then looks like bad credentials.
+    local key
+    key=$(grep -E '^MONGO_DB_KEY=' "$env_file" | head -1 | cut -d= -f2- | tr -d '\r')
+    key=$(printf '%s' "$key" | sed -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/")
+    [ -n "$key" ] || { log_err "MONGO_DB_KEY is empty in ${env_file}"; return 1; }
+
+    printf '%s' "$key"
+}
+
+# @name mdb
+# @description Open a mongo shell on the project database, authenticated with the
+#              key from .env.local. Extra args are passed through to `mongo`.
+# @remark      The password lands in the process argv, so it is briefly visible in
+#              `ps` on this host. Acceptable on a local dev box; use `mdb-prompt`
+#              on a shared machine to type it interactively instead.
+# @example mdb
+# @example mdb --quiet --eval 'db.users.countDocuments()'
+mdb() {
+    local key
+    key=$(_mongo_key) || return 1
+    mongo "mongodb://${MONGO_DB_USER}:${key}@127.0.0.1:27017/${MONGO_DB_NAME}" "$@"
+}
+
+# @name mdb_prompt
+# @description Same as `mdb` but prompts for the password instead of passing it on
+#              the command line. Use when `ps` visibility matters.
+# @example mdb_prompt
+# @example mdb-prompt --quiet --eval 'db.version()'
+mdb_prompt() {
+    mongo --host 127.0.0.1 --port 27017 \
+        --username "$MONGO_DB_USER" --password \
+        --authenticationDatabase "$MONGO_DB_NAME" "$MONGO_DB_NAME" "$@"
+}
+alias mdb-prompt='mdb_prompt'
+
+# @name mdb_eval
+# @description Run a single JS expression against the project DB and print the result.
+# @param $1 string  JavaScript expression
+# @example mdb_eval 'db.users.countDocuments()'
+# @example mdbe 'db.bids.find({}, {project_name: 1}).limit(5)'
+mdb_eval() {
+    [ -n "$1" ] || { log_err "Usage: mdb_eval '<js expression>'"; return 1; }
+    mdb --quiet --eval "$1"
+}
+alias mdbe='mdb_eval'
+
+# @name _mdb_safe_arg
+# @description Reject an argument containing a single quote. The helpers below embed
+#              their argument in a single-quoted JS string literal, so a quote would
+#              break out of it — real collection names never contain one.
+# @example _mdb_safe_arg "$1" || return 1
+_mdb_safe_arg() {
+    case "$1" in
+        *\'*) log_err "Argument may not contain a single quote: $1"; return 1 ;;
+    esac
+}
+
+# @name mdb_collections
+# @description List collection names, one per line. With an argument, list only the
+#              ones whose name matches it as a case-insensitive regex.
+# @param $1 string  Optional name filter (regex)
+# @example mdb_collections
+# @example mdb_collections bid
+# @example mdb-collections '^mobile'
+mdb_collections() {
+    if [ -z "$1" ]; then
+        mdb_eval 'db.getCollectionNames().sort().join("\n")'
+    else
+        _mdb_safe_arg "$1" || return 1
+        # RegExp() rather than a /literal/ — a pattern containing '/' is legal input but
+        # would terminate a literal early and produce a JS syntax error
+        mdb_eval "db.getCollectionNames().sort().filter(c => new RegExp('$1', 'i').test(c)).join('\n')"
+    fi
+}
+alias mdb-collections='mdb_collections'
+
+# @name mdb_counts
+# @description Document count per collection. With an argument, count only that one.
+# @param $1 string  Optional collection name
+# @remark      countDocuments needs an explicit filter on the 4.4 shell — an empty
+#              call throws Location15959.
+# @example mdb_counts
+# @example mdb_counts bids
+mdb_counts() {
+    if [ -z "$1" ]; then
+        mdb_eval 'db.getCollectionNames().sort().forEach(c => print(c + ": " + db[c].countDocuments({})))'
+    else
+        _mdb_safe_arg "$1" || return 1
+        mdb_eval "if (db.getCollectionNames().indexOf('$1') < 0) { print('No such collection: $1'); quit(1) } print('$1: ' + db['$1'].countDocuments({}))"
+    fi
+}
+alias mdb-counts='mdb_counts'
+
+# @name mdb_size
+# @description Storage summary in MB. No argument = whole database; with a collection
+#              name = that collection's docs, storage, average object size and indexes.
+# @param $1 string  Optional collection name
+# @example mdb_size
+# @example mdb_size budgets
+mdb_size() {
+    if [ -z "$1" ]; then
+        mdb_eval 'JSON.stringify(db.stats(1024*1024), null, 2)'
+    else
+        _mdb_safe_arg "$1" || return 1
+        # scale 1 (bytes) then convert here: stats(1024*1024) truncates to an integer,
+        # so anything under a megabyte reports a useless 0
+        mdb_eval "if (db.getCollectionNames().indexOf('$1') < 0) { print('No such collection: $1'); quit(1) } var s = db['$1'].stats(); var mb = b => +(b / 1048576).toFixed(2); printjson({ns: s.ns, count: s.count, dataSizeMB: mb(s.size), storageSizeMB: mb(s.storageSize), avgObjSizeBytes: s.avgObjSize || 0, indexes: s.nindexes, indexSizeMB: mb(s.totalIndexSize)})"
+    fi
+}
+alias mdb-size='mdb_size'
+
+# @name mdb_indexes
+# @description List index definitions as "<name> <keys> [flags]".
+# @param $1 string  Optional collection name
+# @remark      The survey view (no argument) omits the automatic _id_ index — every
+#              collection has one and 37 such lines bury the interesting ones. Naming
+#              a collection shows all of its indexes, _id_ included.
+# @example mdb_indexes
+# @example mdb_indexes mobileformanswers
+mdb_indexes() {
+    if [ -z "$1" ]; then
+        mdb_eval 'db.getCollectionNames().sort().forEach(c => { db[c].getIndexes().forEach(i => { if (i.name === "_id_") { return } var f = []; if (i.unique) { f.push("unique") } if (i.sparse) { f.push("sparse") } if (i.partialFilterExpression) { f.push("partial") } if (i.expireAfterSeconds !== undefined) { f.push("ttl=" + i.expireAfterSeconds) } print(c + "." + i.name + " " + JSON.stringify(i.key) + (f.length ? " [" + f.join(",") + "]" : "")) }) })'
+    else
+        _mdb_safe_arg "$1" || return 1
+        mdb_eval "if (db.getCollectionNames().indexOf('$1') < 0) { print('No such collection: $1'); quit(1) } db['$1'].getIndexes().forEach(i => { var f = []; if (i.unique) { f.push('unique') } if (i.sparse) { f.push('sparse') } if (i.partialFilterExpression) { f.push('partial') } if (i.expireAfterSeconds !== undefined) { f.push('ttl=' + i.expireAfterSeconds) } print(i.name + ' ' + JSON.stringify(i.key) + (f.length ? ' [' + f.join(',') + ']' : '')) })"
+    fi
+}
+alias mdb-indexes='mdb_indexes'
+
+# @name mdb_ops
+# @description Operations currently in progress — first stop when something hangs.
+#              Server-wide by default; an argument filters by namespace regex.
+# @param $1 string  Optional namespace filter, e.g. 'bids' or '^bms\.users'
+# @example mdb_ops
+# @example mdb_ops bids
+mdb_ops() {
+    if [ -z "$1" ]; then
+        mdb_eval 'JSON.stringify(db.currentOp(), null, 2)'
+    else
+        _mdb_safe_arg "$1" || return 1
+        mdb_eval "JSON.stringify(db.currentOp({ns: {\$regex: '$1'}}), null, 2)"
+    fi
+}
+alias mdb-ops='mdb_ops'
+
+# --- migrate-mongo (the only sanctioned way to change schema/data) ---
+
+# @name mdb_migrate
+# @description Run a migrate-mongo script from the project dir, wherever you are.
+# @param $@ string  Script suffix: status | up | down | create <name>
+# @example mdb_migrate status
+# @example mdb-migrate create add_user_index
+mdb_migrate() {
+    [ -n "$1" ] || { log_err "Usage: mdb_migrate <status|up|down|create <name>>"; return 1; }
+    ( cd "$MONGO_PROJECT_DIR" && pnpm "migrate:$@" )
+}
+alias mdb-migrate='mdb_migrate'
+
+alias mdb-migrate-status='mdb_migrate status'
+alias mdb-migrate-create='mdb_migrate create'
+# up/down mutate the DB. Spelled out in full on purpose — CLAUDE.md rule 6 says to ask
+# before running these against the local DB, and a two-letter alias invites the opposite.
+alias mdb-migrate-up='mdb_migrate up'
+alias mdb-migrate-down='mdb_migrate down'
+
+# --- Backup / restore ---
+
+MONGO_BACKUP_DIR="${MONGO_BACKUP_DIR:-$HOME/mongo-backup}"
+
+# @name mdb_dump
+# @description Dump the project DB to one gzipped archive file under MONGO_BACKUP_DIR.
+# @param $1 string  Optional archive path (default: <MONGO_BACKUP_DIR>/<db>_<timestamp>.archive.gz)
+# @example mdb_dump
+# @example mdb_dump ~/mongo-backup/before_migration.archive.gz
+mdb_dump() {
+    local key archive
+    key=$(_mongo_key) || return 1
+    archive="${1:-${MONGO_BACKUP_DIR}/${MONGO_DB_NAME}_$(date +%F_%H%M%S).archive.gz}"
+
+    mkdir -p "$(dirname "$archive")" || { log_err "Cannot create $(dirname "$archive")"; return 1; }
+
+    local log_file status docs
+    log_file=$(mktemp)
+    mongodump --uri "mongodb://${MONGO_DB_USER}:${key}@127.0.0.1:27017/${MONGO_DB_NAME}" \
+        --gzip --archive="$archive" 2>&1 | tee "$log_file"
+    status=${PIPESTATUS[0]}
+
+    if [ "$status" -ne 0 ]; then
+        rm -f "$log_file"
+        log_err "mongodump failed"
+        return 1
+    fi
+
+    # mongodump also exits 0 when it dumped nothing at all — and then may not even create
+    # the archive. Reporting success there hands you a "backup" that would restore nothing,
+    # which is worse than a visible failure.
+    if [ ! -s "$archive" ]; then
+        rm -f "$log_file"
+        log_err "No archive written — nothing was dumped from '${MONGO_DB_NAME}'"
+        return 1
+    fi
+
+    docs=$(sed -nE 's/.*done dumping [^ ]+ \(([0-9]+) documents?\).*/\1/p' "$log_file" | awk '{s+=$1} END {print s+0}')
+    rm -f "$log_file"
+    log_ok "Dumped ${docs} document(s) from ${MONGO_DB_NAME} -> ${archive} ($(du -h "$archive" | cut -f1))"
+}
+alias mdb-dump='mdb_dump'
+
+# @name mdb_restore
+# @description Restore the project DB from an archive produced by mdb_dump.
+# @param $1 string  Archive path
+# @param $2 string  Optional: --drop (replace instead of merge; asks to confirm) or --dry
+# @remark      Without --drop this MERGES: documents whose _id already exists are
+#              skipped, not updated — so a restore over live data can silently
+#              leave a mix of old and new. --drop is usually what you actually want.
+# @remark      authSource is set explicitly and namespaces come from --nsInclude;
+#              putting the db in the URI path makes mongorestore treat it as the
+#              deprecated --db and warn.
+# @example mdb_restore ~/mongo-backup/bms_2026-08-12_144500.archive.gz --dry
+# @example mdb_restore ~/mongo-backup/bms_2026-08-12_144500.archive.gz --drop
+mdb_restore() {
+    local key archive="$1" mode="$2" reply
+    local extra_args=()
+
+    [ -n "$archive" ] || { log_err "Usage: mdb_restore <archive.gz> [--drop|--dry]"; return 1; }
+    case "$archive" in
+        --*) log_err "Archive path comes first: mdb_restore <archive.gz> ${archive}"; return 1 ;;
+    esac
+    [ -f "$archive" ] || { log_err "Not found: ${archive}"; return 1; }
+    key=$(_mongo_key) || return 1
+
+    case "$mode" in
+        --drop)
+            log_warn "--drop DELETES every collection in '${MONGO_DB_NAME}' before restoring."
+            read -r -p "Type the database name to confirm: " reply
+            [ "$reply" = "$MONGO_DB_NAME" ] || { log_err "Aborted"; return 1; }
+            extra_args=(--drop)
+            ;;
+        --dry)
+            extra_args=(--dryRun)
+            log_step "Dry run — nothing will be written"
+            ;;
+        "")
+            log_warn "Merging into '${MONGO_DB_NAME}' — colliding _id are skipped. Pass --drop to replace."
+            ;;
+        *)
+            log_err "Unknown option: ${mode} (expected --drop or --dry)"
+            return 1
+            ;;
+    esac
+
+    local log_file status
+    log_file=$(mktemp)
+    mongorestore --uri "mongodb://${MONGO_DB_USER}:${key}@127.0.0.1:27017/?authSource=${MONGO_DB_NAME}" \
+        --gzip --archive="$archive" --nsInclude="${MONGO_DB_NAME}.*" "${extra_args[@]}" 2>&1 | tee "$log_file"
+    status=${PIPESTATUS[0]}
+
+    if [ "$status" -ne 0 ]; then
+        rm -f "$log_file"
+        log_err "mongorestore failed"
+        return 1
+    fi
+
+    if [ "$mode" = "--dry" ]; then
+        rm -f "$log_file"
+        log_ok "Dry run OK — archive is readable, nothing written"
+        return 0
+    fi
+
+    # mongorestore exits 0 even when it wrote nothing, so the summary line is the only
+    # honest signal. Two very different situations both end in "0 restored", and saying
+    # the wrong one sends you hunting in the wrong place:
+    #   0 restored / 0 failed  -> --nsInclude matched nothing (archive from another DB)
+    #   0 restored / N failed  -> every _id already exists; merge mode skipped them all
+    local restored failed
+    restored=$(sed -nE 's/.*^0-9 document\(s\) restored successfully.*/\1/p' "$log_file" | tail -1)
+    failed=$(sed -nE 's/.*^0-9 document\(s\) failed to restore.*/\1/p' "$log_file" | tail -1)
+    rm -f "$log_file"
+
+    if [ "${restored:-0}" -eq 0 ]; then
+        if [ "${failed:-0}" -gt 0 ]; then
+            log_err "Nothing restored — all ${failed} document(s) already exist. Use --drop to replace them."
+        else
+            log_err "Nothing restored — archive holds no '${MONGO_DB_NAME}.*' namespace. Inspect it with: mdb_restore '${archive}' --dry"
+        fi
+        return 1
+    fi
+
+    if [ "${failed:-0}" -gt 0 ]; then
+        log_warn "Skipped ${failed} document(s) that already existed — use --drop for an exact replace"
+    fi
+    log_ok "Restored ${restored} document(s) into ${MONGO_DB_NAME} <- ${archive}"
+}
+alias mdb-restore='mdb_restore'
+
+# List existing backups, newest last
+alias mdb-backups='ls -lhtr "$MONGO_BACKUP_DIR" 2>/dev/null || log_warn "No backups in $MONGO_BACKUP_DIR"'
+
+# @name mongo_status
+# @description Show mongod service state, server version, and project DB reachability.
+# @example mongo_status
+# @example mgs
+mongo_status() {
+    log_head "MongoDB Status"
+    echo ""
+
+    log_step "Service:"
+    if systemctl is-active --quiet mongod; then
+        log_ok "mongod is running"
+    else
+        log_err "mongod is not running"
+    fi
+    systemctl status mongod --no-pager -l 2>/dev/null | tail -n 5
+    echo ""
+
+    log_step "Connection (${MONGO_DB_USER}@${MONGO_DB_NAME}):"
+    if mdb_eval 'db.version()' 2>/dev/null; then
+        log_ok "Authenticated against ${MONGO_DB_NAME}"
+    else
+        log_err "Cannot connect — check MONGO_DB_KEY in ${MONGO_PROJECT_DIR}/.env.local"
+        return 1
+    fi
+    echo ""
+
+    log_step "Pending migrations:"
+    local pending
+    pending=$(mdb_migrate status 2>/dev/null | grep PENDING)
+    if [ -n "$pending" ]; then
+        echo "$pending"
+    else
+        log_ok "None — all migrations applied"
+    fi
+}
+alias mgs='mongo_status'
+alias mongo-status='mongo_status'

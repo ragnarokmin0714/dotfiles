@@ -1,0 +1,13 @@
+# =============================================================================
+# .shellcheckrc — Repo-wide ShellCheck policy
+# =============================================================================
+# Used by tests/lint.sh and picked up automatically by editor integrations.
+#
+# SC1091: sourced files are resolved at runtime (deploy-time paths) —
+#         ShellCheck cannot follow them; each module is checked individually.
+# SC2034: many variables (STYLE map, COLOR_*, PKG_* tables) are defined in one
+#         module and consumed by sibling modules — cross-file, not unused.
+# SC2155: declare-and-assign masks return values — pervasive local idiom in
+#         prompt/alias code where the return value is never consulted.
+# =============================================================================
+disable=SC1091,SC2034,SC2155

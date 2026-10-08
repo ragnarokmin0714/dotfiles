@@ -1,0 +1,133 @@
+# =========================
+# --- Nginx ---
+# =========================
+
+# Navigate to nginx config directory
+alias cdnginx='cd /etc/nginx'
+# Edit the main nginx configuration file
+alias nginx-conf='sudo vi /etc/nginx/nginx.conf'
+# Test nginx configuration syntax
+alias nginx-test='sudo nginx -t'
+# Reload nginx gracefully (no connection drop)
+alias nginx-reload='sudo systemctl reload nginx'
+# Full restart
+alias nginx-restart='sudo systemctl restart nginx'
+alias nginx-start='sudo systemctl start nginx'
+alias nginx-stop='sudo systemctl stop nginx'
+
+# @name nginx_status
+# @description Show nginx version, config test result, and systemd service status.
+# @example nginx_status
+# @example ngs
+nginx_status() {
+    log_head "Nginx Status"
+    echo ""
+
+    log_step "Version:"
+    nginx -v 2>&1
+    echo ""
+
+    log_step "Config test:"
+    if sudo nginx -t 2>&1; then
+        log_ok "Config OK"
+    else
+        log_err "Config has errors"
+    fi
+    echo ""
+
+    log_step "Service:"
+    if systemctl is-active --quiet nginx; then
+        log_ok "nginx is running"
+    else
+        log_err "nginx is not running"
+    fi
+    systemctl status nginx --no-pager -l 2>/dev/null | tail -n 5
+}
+alias ngs='nginx_status'
+alias nginx-status='nginx_status'
+
+# @name nginx_test_reload
+# @description Test nginx config syntax and reload only if valid. Aborts on error.
+# @example nginx_test_reload
+# @example ngtr
+nginx_test_reload() {
+    log_warn "Testing nginx config..."
+    if sudo nginx -t 2>&1; then
+        log_warn "Reloading nginx..."
+        if sudo systemctl reload nginx; then
+            log_ok "nginx reloaded successfully"
+        else
+            log_err "Reload failed"
+            return 1
+        fi
+    else
+        log_err "Config test failed — reload aborted"
+        return 1
+    fi
+}
+alias ngtr='nginx_test_reload'
+alias nginx-test-reload='nginx_test_reload'
+
+# @name nginx_log
+# @description Tail nginx access and/or error logs with optional grep filter.
+# @param $1 string  Log target: 'access' | 'error' | 'both' (default: both)
+# @param $2 string  Optional grep pattern to filter output
+# @example nginx_log
+# @example nginx_log error
+# @example nginx_log access 404
+# @example nginx_log both "POST /api"
+nginx_log() {
+    local target="${1:-both}"
+    local filter="$2"
+    local access_log="/var/log/nginx/access.log"
+    local error_log="/var/log/nginx/error.log"
+
+    _ng_tail() {
+        if [[ -n "$filter" ]]; then
+            sudo tail -f "$1" | grep --line-buffered "$filter"
+        else
+            sudo tail -f "$1"
+        fi
+    }
+
+    case "$target" in
+        access) _ng_tail "$access_log" ;;
+        error)  _ng_tail "$error_log"  ;;
+        both)
+            if [[ -n "$filter" ]]; then
+                sudo tail -f "$access_log" "$error_log" | grep --line-buffered "$filter"
+            else
+                sudo tail -f "$access_log" "$error_log"
+            fi
+            ;;
+        *)
+            log_err "Usage: nginx_log [access|error|both] [grep-pattern]"
+            return 1
+            ;;
+    esac
+}
+alias ngl='nginx_log'
+alias nginx-log='nginx_log'
+
+# @name nginx_vhost_list
+# @description List nginx virtual host configs.
+#              Auto-detects conf.d (RHEL/Rocky) or sites-enabled (Debian/Ubuntu).
+# @example nginx_vhost_list
+# @example ngvl
+nginx_vhost_list() {
+    local conf_dir
+    if [[ -d /etc/nginx/conf.d ]]; then
+        conf_dir="/etc/nginx/conf.d"
+    elif [[ -d /etc/nginx/sites-enabled ]]; then
+        conf_dir="/etc/nginx/sites-enabled"
+    else
+        log_err "No nginx config directory found"
+        return 1
+    fi
+
+    log_head "Virtual Hosts: ${conf_dir}"
+    echo ""
+    ls -lh "$conf_dir"
+}
+alias ngvl='nginx_vhost_list'
+alias nginx-vhost-list='nginx_vhost_list'

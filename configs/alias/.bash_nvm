@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# =========================
+# --- Node / nvm ---
+# =========================
+# Depends on .bash_env (log_*, STYLE) and .bash_functions (multiselect), both sourced first.
+
+# --- Query / switch ---
+# List installed node versions
+alias nvm-ls='nvm list'
+# Current active version
+alias nvm-current='nvm current'
+# Switch to the version pinned in ./.nvmrc
+alias nvm-use='nvm use'
+# List all installable versions from nodejs.org (real subcommand is ls-remote)
+alias nvm-remote='nvm ls-remote'
+# List installable LTS versions only
+alias nvm-lts='nvm ls-remote --lts'
+# Disk usage per installed version, plus the download cache (nvm list shows names only)
+alias nvm-size='du -sh "${NVM_DIR:-$HOME/.nvm}"/versions/node/v* "${NVM_DIR:-$HOME/.nvm}"/.cache 2>/dev/null | sort -k2 -V'
+
+# @name nvm-find
+# @description Search installable remote versions for a pattern -- answers
+#              "is this version available to install?". Case-insensitive.
+# @param $1 string  Version pattern, e.g. 22.23  or  v20
+# @example
+#   nvm-find 22.23      # -> v22.23.0, v22.23.1, ...
+nvm-find() {
+    [ -z "$1" ] && { log_err "nvm-find: give a version pattern, e.g. 22.23"; return 1; }
+    nvm ls-remote | grep -i "$1"
+}
+
+# --- Install / uninstall ---
+
+# @name nvm-install
+# @description Install a Node version chosen from a short menu: the latest release
+#              of each LTS line (from `nvm ls-remote --lts`), plus a final "enter
+#              manually" option for anything else. Does not change the default.
+# @depends multiselect (.bash_functions), log_* (.bash_env)
+# @example
+#   nvm-install     # pick a latest-LTS, or choose manual entry
+nvm-install() {
+    local -a targets=() labels=()
+    local line ver name
+    while IFS= read -r line; do
+        ver=$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' <<< "$line")
+        [ -z "$ver" ] && continue
+        name=$(grep -oE 'Latest LTS: [A-Za-z]+' <<< "$line")
+        targets+=("$ver"); labels+=("$ver  (${name:-Latest LTS})")
+    done < <(nvm ls-remote --lts 2>/dev/null | grep -i 'Latest LTS')
+    if [ ${#targets[@]} -eq 0 ]; then
+        log_err "nvm-install: could not fetch the LTS list (network?)"; return 1
+    fi
+    labels+=("↵  enter a version manually…")
+
+    local selected
+    multiselect selected "Install a Node version (latest LTS of each line):" "${labels[@]}" \
+        || { log_info "Cancelled"; return 0; }
+    local -a picks; read -ra picks <<< "$selected"
+    [ ${#picks[@]} -eq 0 ] && { log_info "No version selected"; return 0; }
+    local idx="${picks[0]}"
+
+    local target
+    if [ "$idx" -eq "$(( ${#labels[@]} - 1 ))" ]; then
+        read -rp "Enter version (e.g. v22.23.1, 22, --lts): " target
+        [ -z "$target" ] && { log_info "No version entered"; return 0; }
+    else
+        target="${targets[$idx]}"
+    fi
+
+    nvm install "$target" || return 1
+    log_ok "installed $target  (activate with: nvm-use $target)"
+}
+alias nvm-i='nvm-install'
+
+# @name nvm-uninstall
+# @description Multi-select uninstall from the already-installed versions, each
+#              labelled with its disk usage. The version currently in use is
+#              labelled and skipped (nvm refuses to remove the active one).
+# @depends multiselect (.bash_functions), log_* (.bash_env)
+# @example
+#   nvm-uninstall   # tick one or more installed versions to remove
+nvm-uninstall() {
+    local nvm_dir="${NVM_DIR:-$HOME/.nvm}"
+    local -a dirs=() versions=()
+    local d
+    for d in "$nvm_dir"/versions/node/v*/; do
+        [ -d "$d" ] || continue
+        dirs+=("$(basename "$d")")
+    done
+    if [ ${#dirs[@]} -eq 0 ]; then
+        log_err "nvm-uninstall: no installed versions under $nvm_dir/versions/node"; return 1
+    fi
+    mapfile -t versions < <(printf '%s\n' "${dirs[@]}" | sort -V)
+    local current; current="$(nvm current 2>/dev/null)"
+    local -a labels=(); local v size
+    for v in "${versions[@]}"; do
+        size="$(du -sh "$nvm_dir/versions/node/$v" 2>/dev/null | cut -f1)"
+        if [ "$v" == "$current" ]; then labels+=("$v  ${size:-?}  (current)"); else labels+=("$v  ${size:-?}"); fi
+    done
+
+    local selected
+    multiselect selected "Uninstall Node version(s):" "${labels[@]}" \
+        || { log_info "Cancelled"; return 0; }
+    local -a picks; read -ra picks <<< "$selected"
+    [ ${#picks[@]} -eq 0 ] && { log_info "Nothing selected"; return 0; }
+
+    local idx ver
+    for idx in "${picks[@]}"; do
+        ver="${versions[$idx]}"
+        if [ "$ver" == "$current" ]; then
+            log_warn "skipping $ver (currently in use)"; continue
+        fi
+        if nvm uninstall "$ver"; then log_ok "uninstalled $ver"; else log_err "failed: $ver"; fi
+    done
+}
+alias nvm-uni='nvm-uninstall'
+# Delete the downloaded tarballs under $NVM_DIR/.cache -- installed versions are unaffected,
+# the only cost is re-downloading if you ever reinstall the same version.
+alias nvm-cache-clear='nvm cache clear'
+alias nvm-cc='nvm cache clear'
+
+# --- Upgrade ---
+# @name nvm-upgrade
+# @description Upgrade Node to the version in ./.nvmrc (or $1), carrying global
+#              npm packages over from the current version, re-enabling corepack,
+#              then setting it as the default. A same-major bump (e.g. 22.x -> 22.y)
+#              keeps the ABI, so existing node_modules need no rebuild.
+# @param $1 string  Target version, or `-m`/`--select` for the picker (then $2 =
+#                   optional version filter, default = current major). Omit → ./.nvmrc.
+# @depends multiselect (.bash_functions), log_* (.bash_env)
+# @example
+#   nvm-upgrade              # read ./.nvmrc and upgrade to it (e.g. 22.23.1)
+#   nvm-upgrade 22.23.1      # upgrade to an explicit version
+#   nvm-upgrade -m           # pick from remote versions of the current major
+#   nvm-upgrade -m v20       # pick from remote v20.* versions
+nvm-upgrade() {
+    # -m / --select: choose the target from `nvm ls-remote` (filtered) via multiselect.
+    if [[ "$1" == "-m" || "$1" == "--select" ]]; then
+        shift
+        local filter="${1:-$(nvm current | grep -oE '^v[0-9]+')}"
+        log_info "nvm-upgrade: fetching remote versions matching '${filter:-all}'..."
+        local -a versions
+        mapfile -t versions < <(nvm ls-remote 2>/dev/null \
+            | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | grep -E "^${filter}" | awk '!seen[$0]++' | tail -40)
+        if [[ ${#versions[@]} -eq 0 ]]; then
+            log_err "nvm-upgrade: no remote versions match '${filter}'"; return 1
+        fi
+        local selected
+        multiselect selected "Select Node version to upgrade to (${filter:-all}, newest last):" \
+            "${versions[@]}" || { log_info "Cancelled"; return 0; }
+        local -a picks; read -ra picks <<< "$selected"
+        [[ ${#picks[@]} -eq 0 ]] && { log_info "No version selected"; return 0; }
+        [[ ${#picks[@]} -gt 1 ]] && log_warn "Multiple selected; using the first."
+        set -- "${versions[${picks[0]}]}"
+    fi
+
+    local target="${1:-$(cat ~/.nvmrc 2>/dev/null)}"
+    if [ -z "$target" ]; then
+        log_err "nvm-upgrade: no version given and no ./.nvmrc in current dir"
+        return 1
+    fi
+    local from; from="$(nvm current)"
+    nvm install "$target" --reinstall-packages-from="$from" || return 1
+    corepack enable
+    nvm alias default "$target"
+    log_ok "node -> $(node -v) (from $from); pnpm $(pnpm -v 2>/dev/null || echo '?')"
+}
+alias nvm-up='nvm-upgrade'

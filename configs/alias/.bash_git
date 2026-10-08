@@ -1,51 +1,250 @@
-#!/usr/bin/env bash
-# @file .bash_git
-# @brief Git aliases and interactive helper functions.
-# @description
-#   Provides shorthand aliases for common Git operations and interactive
-#   functions for branch management, pushing, and remote checkout.
-#   All functions validate the current Git repository state before executing.
+# =========================
+# --- Git Commands ---
+# =========================
 
-# =============================================================================
-# --- Git Aliases ---
-# =============================================================================
+# show current branch with tracking info and last commit
+alias git-branch-current='git branch -vv --color | grep "^\*"'
+alias gbc='git-branch-current'
 
-# Amend last commit without changing its message
-alias amend='git commit --amend --no-edit'
-alias git-amend='amend'
-
-# Fetch + merge from origin/main into current branch
-alias gfm='git fetch origin main && git merge origin/main'
-alias gpm='git pull origin main'
-alias git-fetch-main='gfm'
-
-# Fetch and prune stale remote-tracking references
-alias gfp='git fetch --prune'
-alias gfap='git fetch --all --prune'
-
-# Force push safely after amend (preserves remote history)
+# Force push safely after amend
 alias safe-push='git push --force-with-lease'
 alias amend-safe-push='git commit --amend --no-edit && git push --force-with-lease'
+
+# @name git_amend
+# @description Amend the last commit.
+#              Without arguments: keeps the existing commit message.
+#              With -m: allows updating the commit message.
+# @param -m string Optional new commit message
+# @example git_amend
+# @example git_amend -m "fix: correct typo in button label"
+# @example amend
+# @example amend -m "feat: add login page"
+# @example git-amend
+# @example git-amend -m "chore: update dependencies"
+git_amend() {
+    if [[ "$1" == "-m" && -n "$2" ]]; then
+        # ── Amend with new message ────────────────────────────────────────────
+        git commit --amend -m "$2" && \
+            log_ok "Amend with new message: $2" || {
+            log_err "Amend failed"
+            return 1
+        }
+    else
+        # ── Amend without changing message ────────────────────────────────────
+        git commit --amend --no-edit && \
+            log_ok "Amend without changing message" || {
+            log_err "Amend failed"
+            return 1
+        }
+    fi
+}
+alias amend='git_amend'
+alias git-amend='git_amend'
+
+# Fetch remote main branch and merge into current branch
+# Consider using --ff-only to avoid unnecessary merge commits
+alias git-fetch-merge-main='git fetch origin main && git merge origin/main'
+alias gpm='git pull origin main'
+alias git-pull-main='git pull origin main'
+# @name git_fetch_merge
+# @description Fetch and merge a remote branch into current branch.
+#              Lists all remote branches (excluding current) if no argument provided.
+# @param $1 string Remote branch to merge (optional, interactive if omitted)
+# @example git_fetch_merge
+# @example git_fetch_merge featureA
+# @example gfm featureA
+git_fetch_merge() {
+    local branch="$1"
+
+    # ── Get current branch ────────────────────────────────────────────────────
+    local current
+    current=$(git symbolic-ref --short HEAD 2>/dev/null) || {
+        log_err "Not inside a git repository"
+        return 1
+    }
+
+    # ── Interactive branch selection ──────────────────────────────────────────
+    local interactive=0
+    if [[ -z "$branch" ]]; then
+        interactive=1
+        log_warn "Fetching remote branches..."
+        git fetch --all --prune 2>/dev/null
+
+        # Get all remote branches excluding current
+        local available=()
+        while IFS= read -r b; do
+            [[ "$b" != "$current" ]] && available+=("$b")
+        done <<< "$(git branch -r | grep -v '\->' | sed 's/^ *origin\///')"
+
+        if [[ ${#available[@]} -eq 0 ]]; then
+            log_err "No remote branches available to merge"
+            return 1
+        fi
+
+        # ── Display list ──────────────────────────────────────────────────────
+        echo ""
+        # Two-color line (yellow label + green branch name): kept inline via STYLE
+        echo -e "${STYLE[fg_yellow]}Current branch: ${STYLE[fg_green]}${current}${STYLE[reset]}"
+        log_head "Available branches to merge"
+
+        # ── Prompt selection ──────────────────────────────────────────────────
+        local choice
+        radioselect choice "" -1 "${available[@]}" || { log_warn "Merge cancelled"; return 0; }
+        branch="${available[$choice]}"
+    fi
+
+    # ── Confirm before merging (menu mode only) ───────────────────────────────
+    # 僅在選單模式（未帶 branch 參數）下詢問，避免互動誤選後直接 merge
+    if [[ "$interactive" -eq 1 ]]; then
+        echo ""
+        log_step "Command: git merge origin/${branch} into ${current}"
+        echo ""
+        read -rp "Proceed with merge? (y/N): " confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            log_warn "Merge cancelled"
+            return 0
+        fi
+    fi
+
+    # ── Fetch ─────────────────────────────────────────────────────────────────
+    echo ""
+    log_warn "Fetching origin/${branch}..."
+    git fetch origin "$branch" || {
+        log_err "Failed to fetch origin/${branch}"
+        return 1
+    }
+
+    # ── Merge ─────────────────────────────────────────────────────────────────
+    log_warn "Merging origin/${branch} into ${current}..."
+    git merge "origin/$branch" || {
+        log_err "Merge conflict detected, please resolve manually"
+        return 1
+    }
+
+    log_ok "Successfully merged origin/${branch} into ${current}"
+}
+alias gfm='git_fetch_merge'
+alias git-fetch-merge='git_fetch_merge'
+
+# Fetch and prune origin remote branches
+alias gfp='git fetch --prune'
+# Fetch and prune all remotes
+alias gfap='git fetch --all --prune'
+
+# @name git_clean_merged
+# @description Delete local branches already merged into a base branch (default: main).
+#              Lists the candidates and asks for confirmation before deleting anything.
+#              Safety: deletion uses `git branch -d`, never -D, so git itself refuses
+#              any branch holding unmerged commits; the base branch and the current
+#              branch are filtered out before the list is even shown.
+#              Deleted branches stay recoverable for ~90 days via the reflog:
+#              `git branch <name> <sha>`.
+#              Run `gfp` first so the base branch is up to date -- a stale base only
+#              means fewer branches are detected, never a wrong deletion.
+#              NOTE: relies on real merge commits. Under a squash-merge or rebase
+#              workflow `git branch --merged` cannot see the merge, so nothing lists.
+# @param $1 string Base branch to compare against (optional, default: main)
+# @param -n|--dry-run Show what would be deleted, then exit without deleting
+# @example git_clean_merged
+# @example git_clean_merged develop
+# @example gcmb
+# @example gcmb -n
+git_clean_merged() {
+    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+        log_err "Not inside a git repository"
+        return 1
+    fi
+
+    # ── Parse arguments ───────────────────────────────────────────────────────
+    local dry_run=0 base="" arg
+    for arg in "$@"; do
+        case "$arg" in
+            -n|--dry-run) dry_run=1 ;;
+            -*)           log_err "Unknown option: $arg"; return 1 ;;
+            *)            base="$arg" ;;
+        esac
+    done
+    base="${base:-main}"
+
+    if ! git show-ref --verify --quiet "refs/heads/${base}"; then
+        log_err "Base branch not found: ${base}"
+        return 1
+    fi
+
+    local current
+    current=$(git symbolic-ref --short HEAD 2>/dev/null)
+
+    # ── Collect candidates ────────────────────────────────────────────────────
+    # --merged lists branches whose tip is reachable from base, i.e. fully merged in.
+    local -a candidates=()
+    local b
+    while IFS= read -r b; do
+        [[ -z "$b" || "$b" == "$base" || "$b" == "$current" ]] && continue
+        candidates+=("$b")
+    done < <(git branch --merged "$base" --format='%(refname:short)')
+
+    if [[ ${#candidates[@]} -eq 0 ]]; then
+        log_info "No merged branches to clean (base: ${base})"
+        return 0
+    fi
+
+    # ── Preview ───────────────────────────────────────────────────────────────
+    echo ""
+    log_head "Merged into ${base} -- will be deleted (${#candidates[@]})"
+    for b in "${candidates[@]}"; do
+        printf "  %s\n" "$b"
+    done
+    echo ""
+    local kept="${base} (base)"
+    [[ -n "$current" && "$current" != "$base" ]] && kept+=", ${current} (current)"
+    log_info "Kept: ${kept}, and every unmerged branch"
+
+    if [[ "$dry_run" -eq 1 ]]; then
+        log_info "Dry run -- nothing deleted"
+        return 0
+    fi
+
+    # ── Confirm ───────────────────────────────────────────────────────────────
+    echo ""
+    read -rp "Delete these ${#candidates[@]} branches? (y/N): " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "Cancelled"
+        return 0
+    fi
+
+    # ── Delete ────────────────────────────────────────────────────────────────
+    local deleted=0 skipped=0
+    for b in "${candidates[@]}"; do
+        if git branch -d "$b" &>/dev/null; then
+            log_ok "Deleted: ${b}"
+            (( deleted++ ))
+        else
+            # -d also refuses a branch checked out in another worktree
+            log_warn "Skipped: ${b} (refused by git branch -d)"
+            (( skipped++ ))
+        fi
+    done
+
+    echo ""
+    log_info "Deleted ${deleted}, skipped ${skipped}. Recover any of them with: git branch <name> <sha> (see git reflog)"
+}
+alias git-clean-merged='git_clean_merged'
+alias gcmb='git_clean_merged'
 
 # Undo last commit, keep changes staged
 alias git-undo='git reset --soft HEAD~1'
 # Undo last commit, discard all changes (irreversible)
 alias git-drop='git reset --hard HEAD~1'
 
-# =============================================================================
-# --- Interactive Git Functions ---
-# =============================================================================
-
 # @name git_switch_and_pull
-# @description Interactively select a local branch (excluding current) and
-#              run git pull origin main after switching.
-#              Validates git repo, branch availability, and user input.
+# @description Interactively select a branch (excluding current) and run git pull origin main.
+#              Validates git repo, branch availability, and user input before switching.
 # @example git_switch_and_pull
 # @example gswp
 git_switch_and_pull() {
     # Validate: must be inside a git repository
     if ! git rev-parse --is-inside-work-tree &>/dev/null; then
-        echo "[ERROR] Not inside a git repository"
+        log_err "Not inside a git repository"
         return 1
     fi
 
@@ -53,8 +252,8 @@ git_switch_and_pull() {
     current_branch=$(git symbolic-ref --short HEAD 2>/dev/null)
 
     # Validate: must not be in detached HEAD state
-    if [[ -z "$current_branch" ]]; then
-        echo "[ERROR] Cannot determine current branch (detached HEAD?)"
+    if [ -z "$current_branch" ]; then
+        log_err "Cannot determine current branch (detached HEAD?)"
         return 1
     fi
 
@@ -63,46 +262,36 @@ git_switch_and_pull() {
     branches=$(git branch | grep -v "^\* " | sed 's/^[[:space:]]*//')
 
     # Validate: at least one other branch must exist
-    if [[ -z "$branches" ]]; then
-        echo "[WARN] No other branches available to switch (current: $current_branch)"
+    if [ -z "$branches" ]; then
+        log_warn "No other branches available to switch (current: $current_branch)"
         return 1
     fi
 
-    echo "[INFO] Current branch: $current_branch"
-    echo "[INFO] Available branches:"
+    log_info "Current branch: $current_branch"
+    log_info "Available branches:"
 
-    # Build indexed list for user selection
-    local i=1
-    local branch_array=()
-    while IFS= read -r branch; do
-        echo "  $i) $branch"
-        branch_array+=("$branch")
-        (( i++ ))
-    done <<< "$branches"
+    local -a branch_array
+    local choice
+    mapfile -t branch_array <<< "$branches"
+    radioselect choice "" -1 "${branch_array[@]}" || { log_info "Cancelled"; return 0; }
 
-    echo ""
-    read -rp "Select branch number (1-${#branch_array[@]}): " choice
+    local target_branch="${branch_array[$choice]}"
 
-    # Validate: input must be a positive integer within range
-    if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
-        echo "[ERROR] Invalid input: not a number"
+    log_info "Switching to branch: $target_branch"
+    git switch "$target_branch" || {
+        log_err "Failed to switch branch"
         return 1
-    fi
-    if [[ "$choice" -lt 1 || "$choice" -gt "${#branch_array[@]}" ]]; then
-        echo "[ERROR] Invalid input: number out of range (1-${#branch_array[@]})"
+    }
+
+    log_info "Running git pull origin main..."
+    git pull origin main || {
+        log_err "git pull failed"
         return 1
-    fi
+    }
 
-    local target_branch="${branch_array[$((choice - 1))]}"
-
-    echo "[INFO] Switching to branch: $target_branch"
-    git switch "$target_branch" || { echo "[ERROR] Failed to switch branch"; return 1; }
-
-    echo "[INFO] Running git pull origin main..."
-    git pull origin main || { echo "[ERROR] git pull failed"; return 1; }
-
-    echo "[INFO] Done. Current branch: $(git symbolic-ref --short HEAD)"
+    log_info "Done. Current branch: $(git symbolic-ref --short HEAD)"
 }
+alias git-switch-and-pull='git_switch_and_pull'
 alias gswp='git_switch_and_pull'
 
 # @name git_push_current_branch
@@ -112,34 +301,43 @@ alias gswp='git_switch_and_pull'
 # @example git_push_current_branch
 # @example gpcb
 git_push_current_branch() {
+    # Validate: must be inside a git repository
     if ! git rev-parse --is-inside-work-tree &>/dev/null; then
-        echo "[ERROR] Not inside a git repository"
+        log_err "Not inside a git repository"
         return 1
     fi
 
     local current_branch
     current_branch=$(git symbolic-ref --short HEAD 2>/dev/null)
 
-    if [[ -z "$current_branch" ]]; then
-        echo "[ERROR] Cannot determine current branch (detached HEAD?)"
+    # Validate: avoid detached HEAD
+    if [ -z "$current_branch" ]; then
+        log_err "Cannot determine current branch (detached HEAD?)"
         return 1
     fi
 
-    echo "[INFO] Current branch: $current_branch"
-    echo "[INFO] Command: git push -u origin $current_branch"
+    log_info "Current branch: $current_branch"
+    log_info "Command: git push -u origin $current_branch"
     echo ""
+
     read -rp "Proceed with push? (y/N): " confirm
 
     # Only explicit 'y' or 'Y' proceeds
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        echo "[INFO] Push cancelled"
+        log_info "Push cancelled"
         return 0
     fi
 
-    git push -u origin "$current_branch" || { echo "[ERROR] Push failed"; return 1; }
-    echo "[INFO] Push completed"
+    git push -u origin "$current_branch" || {
+        log_err "Push failed"
+        return 1
+    }
+
+    log_info "Push completed"
 }
+alias git-push-current-branch='git_push_current_branch'
 alias gpcb='git_push_current_branch'
+
 
 # @name git_checkout_remote
 # @description List remote branches that don't exist locally,
@@ -149,16 +347,16 @@ alias gpcb='git_push_current_branch'
 git_checkout_remote() {
     command -v git >/dev/null 2>&1 || return
     git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
-        echo "Not inside a git repository." >&2
+        log_err "Not inside a git repository"
         return 1
     }
 
-    # Fetch latest remote info
-    echo "Fetching remote branches..."
+    # ── Fetch latest remote info ──────────────────────────────────────────────
+    log_info "Fetching remote branches..."
     git fetch --all --prune 2>/dev/null
 
-    # Get remote-only branches (not present locally)
-    local remote_branches local_branches available i=1
+    # ── Get remote branches excluding locally existing ones ───────────────────
+    local remote_branches local_branches available
     remote_branches=$(git branch -r | grep -v '\->' | sed 's/^ *//' | sed 's|origin/||')
     local_branches=$(git branch | sed 's/^ *\** *//')
 
@@ -169,34 +367,333 @@ git_checkout_remote() {
         fi
     done <<< "$remote_branches"
 
+    # ── No branches available ─────────────────────────────────────────────────
     if [[ ${#available[@]} -eq 0 ]]; then
-        echo "No remote-only branches found." >&2
+        log_err "No remote-only branches found."
         return 1
     fi
 
+    # ── Display list ──────────────────────────────────────────────────────────
     echo ""
-    echo "Available remote branches:"
-    echo "──────────────────────────"
-    for branch in "${available[@]}"; do
-        printf "  [%d] %s\n" "$i" "$branch"
-        (( i++ ))
-    done
-    echo ""
+    log_head "Available remote branches"
 
+    # ── Prompt user to select ─────────────────────────────────────────────────
     local choice
-    read -rp "Select branch number (1-${#available[@]}): " choice
+    radioselect choice "" -1 "${available[@]}" || { log_info "Cancelled"; return 0; }
 
-    if ! [[ "$choice" =~ ^[0-9]+$ ]] || \
-       [[ "$choice" -lt 1 ]] || \
-       [[ "$choice" -gt ${#available[@]} ]]; then
-        echo "Invalid selection." >&2
-        return 1
-    fi
-
-    local selected="${available[$((choice - 1))]}"
+    # ── Fetch and switch ──────────────────────────────────────────────────────
+    local selected="${available[$choice]}"
     echo ""
-    echo "Switching to: $selected"
+    log_info "Switching to: $selected"
     git fetch origin "$selected"
     git switch -c "$selected" "origin/$selected"
 }
+alias git-checkout-remote='git_checkout_remote'
 alias gcr='git_checkout_remote'
+
+# @name git_drop_stashes
+# @description Interactively select multiple stashes to drop.
+#              Supports range input (e.g. 16-19) and comma list (e.g. 1,3,5).
+#              Always drops from highest index first to preserve numbering.
+# @example git_drop_stashes
+# @example gds
+git_drop_stashes() {
+    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+        log_err "Not inside a git repository"
+        return 1
+    fi
+
+    local stash_list
+    stash_list=$(git stash list)
+
+    if [ -z "$stash_list" ]; then
+        log_info "No stashes found"
+        return 0
+    fi
+
+    log_info "Current stashes:"
+    echo "──────────────────────────────────────"
+    git stash list | awk '{printf "  [%d] %s\n", NR-1, $0}'
+    echo "──────────────────────────────────────"
+    echo ""
+
+    echo "  Examples:"
+    echo "    Single : 3"
+    echo "    Range  : 16-19"
+    echo "    List   : 1,3,5"
+    echo "    All    : all"
+    echo ""
+    read -rp "Select stash(es) to drop: " input
+
+    if [[ -z "$input" ]]; then
+        log_info "Cancelled"
+        return 0
+    fi
+
+    local indices=()
+
+    if [[ "$input" == "all" ]]; then
+        read -rp "[WARN] Drop ALL stashes? This is irreversible. (y/N): " confirm
+        [[ ! "$confirm" =~ ^[Yy]$ ]] && log_info "Cancelled" && return 0
+        git stash clear
+        log_info "All stashes cleared"
+        return 0
+    elif [[ "$input" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+        local start="${BASH_REMATCH[1]}" end="${BASH_REMATCH[2]}"
+        for i in $(seq "$start" "$end"); do
+            indices+=("$i")
+        done
+    elif [[ "$input" =~ ^[0-9,]+$ ]]; then
+        IFS=',' read -ra indices <<< "$input"
+    elif [[ "$input" =~ ^[0-9]+$ ]]; then
+        indices=("$input")
+    else
+        log_err "Invalid input format"
+        return 1
+    fi
+
+    local total
+    total=$(git stash list | wc -l | tr -d ' ')
+
+    local sorted
+    sorted=$(printf '%s\n' "${indices[@]}" | sort -rn | uniq)
+
+    echo ""
+    log_info "Will drop: stash@{$(echo "$sorted" | tr ' ' ',')}"
+    read -rp "Confirm? (y/N): " confirm
+    [[ ! "$confirm" =~ ^[Yy]$ ]] && log_info "Cancelled" && return 0
+
+    while IFS= read -r idx; do
+        if [[ "$idx" -ge "$total" ]]; then
+            log_warn "stash@{$idx} does not exist, skipping"
+            continue
+        fi
+        git stash drop "stash@{$idx}" && log_info "Dropped stash@{$idx}" || log_err "Failed to drop stash@{$idx}"
+    done <<< "$sorted"
+
+    echo ""
+    log_info "Done. Remaining stashes: $(git stash list | wc -l | tr -d ' ')"
+}
+alias git-drop-stashes='git_drop_stashes'
+alias gds='git_drop_stashes'
+
+# @name git_restore_deleted
+# @description Find every file deleted under a path and interactively restore the
+#              chosen ones. Files are restored to the WORKING TREE only (not staged,
+#              not committed) so they can be reviewed before `git add`.
+#              Each file is restored from the commit just BEFORE its deletion
+#              (<sha>^), which is the last revision where it still existed.
+#              A path deleted more than once resolves to its most recent deletion.
+#              Existing files are never overwritten -- they are listed and skipped.
+# @param $1 string Path to search (file or directory; default: repo root)
+# @depends multiselect (.bash_functions)
+# @example git_restore_deleted src/components/common
+# @example git_restore_deleted            # whole repo
+# @example grd src/helpers
+git_restore_deleted() {
+    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+        log_err "Not inside a git repository"
+        return 1
+    fi
+
+    local path="${1:-.}"
+
+    # `git log --name-only` prints paths relative to the REPO ROOT, but both the
+    # existence test and `git restore` below resolve relative to the CWD. Run from
+    # any subdirectory those disagree and every restore fails with an unmatched
+    # pathspec, so anchor them to the top level.
+    local root
+    root=$(git rev-parse --show-toplevel)
+
+    # One "<sha>\t<file>" line per deletion, newest first. --format seeds each
+    # commit's sha, then --name-only lists that commit's deleted paths under it.
+    local -a shas=() files=()
+    local sha="" line
+    while IFS= read -r line; do
+        if [[ "$line" == sha:* ]]; then
+            sha="${line#sha:}"
+        elif [[ -n "$line" && -n "$sha" ]]; then
+            # Keep only the newest deletion per path (git log is newest-first).
+            local seen=0 f
+            for f in "${files[@]}"; do
+                [[ "$f" == "$line" ]] && { seen=1; break; }
+            done
+            (( seen )) || { shas+=("$sha"); files+=("$line"); }
+        fi
+    # core.quotePath defaults to true, which prints a non-ASCII path as an escaped,
+    # quoted string ("docs/\344\270\255..."). Fed back to `git restore` that never
+    # matches, so every CJK/accented filename failed to restore. Force it off.
+    done < <(git -c core.quotePath=false log --diff-filter=D --name-only \
+                 --format='sha:%H' -- "$path")
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        log_info "No deleted files found under: ${path}"
+
+        # "Nothing was deleted" is also what you get for a path that simply never
+        # existed on this branch -- it lives on another one. Same message, opposite
+        # cause, and the message alone dead-ends. Name the branch that has it.
+        if [[ -n "$1" && ! -e "${root}/$(git rev-parse --show-prefix)${path}" ]]; then
+            local rel ref
+            rel="$(git rev-parse --show-prefix)${path}"
+            for ref in $(git for-each-ref --format='%(refname:short)' refs/heads refs/remotes); do
+                if git cat-file -e "${ref}:${rel}" 2>/dev/null; then
+                    log_info "It was never deleted -- it lives on ${ref}:"
+                    log_info "  git restore --source=${ref} -- ${rel}"
+                    return 0
+                fi
+            done
+            log_info "Not on any branch either. Search all history with: gfl ${path##*/}"
+        fi
+        return 0
+    fi
+
+    # multiselect renders every option on one cleared screen (no paging), so a
+    # large result set would scroll the cursor out of view. Make the user narrow
+    # the path instead of handing them an unusable menu.
+    if [[ ${#files[@]} -gt 40 ]]; then
+        log_warn "${#files[@]} deleted files under '${path}' -- the menu does not scroll."
+        read -rp "Show them all anyway? Narrowing the path is usually better. (y/N): " confirm
+        [[ ! "$confirm" =~ ^[Yy]$ ]] && { log_info "Cancelled"; return 0; }
+    fi
+
+    # Build one label per deletion; multiselect returns the chosen indices.
+    local -a labels=()
+    local i meta
+    for i in "${!files[@]}"; do
+        meta=$(git log -1 --format='%h %ad %an' --date=short "${shas[$i]}")
+        labels+=("${files[$i]}  (deleted in ${meta})")
+    done
+
+    local picks
+    multiselect picks "Deleted under ${path} -- select files to restore:" "${labels[@]}" || {
+        log_info "Cancelled"
+        return 0
+    }
+    if [[ -z "$picks" ]]; then
+        log_info "Nothing selected"
+        return 0
+    fi
+
+    local restored=0 skipped=0
+    for i in $picks; do
+        local file="${files[$i]}" from="${shas[$i]}^"
+        # -L so a broken symlink counts as present: -e alone is false for one, and
+        # restoring would silently replace the user's link with file content.
+        if [[ -e "${root}/${file}" || -L "${root}/${file}" ]]; then
+            log_warn "Exists already, skipped: ${file}"
+            (( skipped++ ))
+            continue
+        fi
+        if git -C "$root" restore --source="$from" -- "$file" 2>/dev/null; then
+            log_ok "Restored: ${file}  (from ${from})"
+            (( restored++ ))
+        else
+            log_err "Failed to restore: ${file}  (from ${from})"
+        fi
+    done
+
+    echo ""
+    log_info "Restored ${restored}, skipped ${skipped}. Files are unstaged -- review, then 'git add'."
+}
+alias git-restore-deleted='git_restore_deleted'
+alias grd='git_restore_deleted'
+
+# @name git_find_lost
+# @description Locate a file or directory missing from the working tree by searching
+#              all history for the commit that added, deleted, or renamed it.
+#              Read-only -- restores nothing (use `grd` for that).
+#              The name is matched as a case-insensitive SUBSTRING of the full path,
+#              so `gfl dropdown` finds src/components/common/dropdown.js and
+#              `gfl scripts` finds everything under any scripts/ directory -- a
+#              pathspec '*' crosses '/', so one pattern covers files and dirs both.
+#              Each flag below fixes a failure mode where the search returns nothing
+#              while the file DOES exist. A false "never committed" is worse than no
+#              answer, so none of them are optional:
+#                --reflog        finds commits no ref points at any more, dropped by
+#                                `reset --hard`, `commit --amend`, or a deleted branch.
+#                --full-history  any pathspec turns on history simplification, which
+#                                prunes side branches the merge did not keep. Without
+#                                it, a file added and removed inside a feature branch
+#                                that was merged and deleted reports NOTHING.
+#                :(icase)        pathspecs are case-sensitive by default.
+#              NOTE: --diff-filter=ADR reports whole-file events only. A file that
+#              still exists but had its CONTENT removed by some commit shows nothing
+#              here -- use `git log -S'<snippet>' --all` for that.
+# @param $1 string Any part of the file or directory name (case-insensitive)
+# @example git_find_lost reset_db.mjs
+# @example git_find_lost scripts
+# @example gfl dropdown
+git_find_lost() {
+    if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+        log_err "Not inside a git repository"
+        return 1
+    fi
+
+    local name="$1"
+    if [[ -z "$name" ]]; then
+        log_err "Usage: git_find_lost <file-or-directory-name>"
+        return 1
+    fi
+
+    # Tab-completion hands you './scripts'. The name is matched literally inside
+    # '*...*', and no path in git's output carries a './' prefix, so leaving it on
+    # matches nothing and reports a false "never committed".
+    name="${name#./}"
+
+    # core.quotePath=false: otherwise a non-ASCII path prints escaped and quoted,
+    # which no existence test or restore command can match.
+    local out
+    out=$(git -c core.quotePath=false log --all --reflog --full-history --oneline \
+              --name-status --diff-filter=ADR -- ":(icase)*${name}*")
+
+    if [[ -z "$out" ]]; then
+        log_warn "No add/delete/rename matching '${name}' in any ref or reflog"
+        log_info "It may still be in a stash (git stash list), or was never committed."
+        return 1
+    fi
+
+    log_head "History matching '${name}' (A=added D=deleted R=renamed)"
+    echo "$out"
+    echo ""
+
+    # A path missing here but still alive on another branch was never deleted, so
+    # `grd` (--diff-filter=D) will not offer it and dead-ends on "No deleted files".
+    # Name the branch that still has it and print the exact restore command.
+    # git prints these paths relative to the REPO ROOT, so the existence test must
+    # be anchored there too -- CWD-relative, every path looks missing from a
+    # subdirectory and the hint offers to overwrite files that are not even gone.
+    local root path ref
+    root=$(git rev-parse --show-toplevel)
+
+    # -L keeps a broken symlink from counting as absent: the link itself is there,
+    # and offering to restore over it would be wrong.
+    local -a missing=()
+    while IFS= read -r path; do
+        [[ -z "$path" ]] && continue
+        [[ -e "${root}/${path}" || -L "${root}/${path}" ]] && continue
+        missing+=("$path")
+    done < <(echo "$out" | awk -F'\t' '/^[ADR]/ {print $NF}' | sort -u)
+
+    # Locating one path costs a `git cat-file` per ref, so a broad search forks
+    # thousands of times and buries the output: 518 absent paths across 26 refs
+    # measured 28s and printed 518 hints. Past a handful, say so and stop.
+    if (( ${#missing[@]} > 10 )); then
+        log_info "${#missing[@]} matched paths are absent from the working tree -- narrow the search for restore hints."
+        return 0
+    fi
+
+    local found=0
+    for path in "${missing[@]}"; do
+        for ref in $(git for-each-ref --format='%(refname:short)' refs/heads refs/remotes); do
+            if git cat-file -e "${ref}:${path}" 2>/dev/null; then
+                log_info "On ${ref}: git restore --source=${ref} -- ${path}"
+                found=1
+                break
+            fi
+        done
+    done
+
+    (( found )) || log_info "Read a version: git show <sha>:<path>   |  restore deleted files: grd <path>"
+}
+alias git-find-lost='git_find_lost'
+alias gfl='git_find_lost'
