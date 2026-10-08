@@ -117,3 +117,7 @@ COLOR_YELLOW="\033[1;33m"
 COLOR_RED="\033[0;31m"
 COLOR_CYAN="\033[0;36m"
 COLOR_BOLD="\033[1m"
+COLOR_REVERSE="\033[7m"                    # Reverse video (menu cursor row)
+COLOR_BG_GREEN="\033[42m"                  # Symbol backgrounds for log levels
+COLOR_BG_RED="\033[41m"
+COLOR_BG_YELLOW="\033[43m"

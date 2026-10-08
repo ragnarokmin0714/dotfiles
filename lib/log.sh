@@ -2,9 +2,12 @@
 # =============================================================================
 # lib/log.sh — Unified Logging Utility
 # =============================================================================
-# Provides four log-level functions used across all module scripts.
-# Logs are written to both stdout (with color) and a timestamped file
-# under the logs/ directory.
+# Provides the log-level functions used across all module scripts.
+# Every message goes to the timestamped file under logs/ (always plain);
+# terminal output follows the same visual idiom as configs/alias/.bash_env
+# (symbol prefix [V]/[X]/[~]/[i], colored message, NO_COLOR / non-TTY plain
+# fallback). Independent implementation on purpose — see CLAUDE.md rule P2:
+# this layer must stay self-contained and log_error must exit.
 #
 # USAGE:
 #   source "$DOTFILES_ROOT/lib/log.sh"
@@ -37,41 +40,59 @@ _log_raw() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$level] $message" >> "$LOG_FILE"
 }
 
-# log_info — General informational message (cyan)
+# Internal: succeed (0) when output on the given fd should be colored —
+# the fd is a terminal and NO_COLOR is unset (same switch as .bash_env).
+_log_color() { [[ -t "$1" && -z "${NO_COLOR+set}" ]]; }
+
+# Internal: emit one leveled line to the terminal AND the log file.
+# Terminal: "<colored symbol> <colored message>"; non-TTY / NO_COLOR:
+# "<ts> [LABEL] message" (still readable and greppable when piped).
+# Args: $1 fd (1|2), $2 symbol bg color, $3 symbol, $4 msg color, $5 label, $6.. message
+_log_emit() {
+  local fd="$1" sym_color="$2" symbol="$3" msg_color="$4" label="$5"
+  shift 5
+  local msg="$*"
+  if _log_color "$fd"; then
+    echo -e "${sym_color}${symbol}${COLOR_RESET:-\033[0m} ${msg_color}${msg}${COLOR_RESET:-\033[0m}"
+  else
+    printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$label" "$msg"
+  fi
+  _log_raw "$label" "$msg"
+}
+
+# log_info — General informational message (cyan [i])
 log_info() {
-  local msg="$*"
-  echo -e "${COLOR_CYAN:-\033[0;36m}[INFO]${COLOR_RESET:-\033[0m}  $msg"
-  _log_raw "INFO " "$msg"
+  _log_emit 1 "${COLOR_CYAN:-\033[0;36m}" "[i]" "${COLOR_CYAN:-\033[0;36m}" "INFO " "$@"
 }
 
-# log_warn — Non-fatal warning (yellow). Execution continues.
+# log_warn — Non-fatal warning (yellow [~]). Execution continues.
 log_warn() {
-  local msg="$*"
-  echo -e "${COLOR_YELLOW:-\033[1;33m}[WARN]${COLOR_RESET:-\033[0m}  $msg" >&2
-  _log_raw "WARN " "$msg"
+  _log_emit 2 "${COLOR_BG_YELLOW:-\033[43m}" "[~]" "${COLOR_YELLOW:-\033[1;33m}" "WARN " "$@" >&2
 }
 
-# log_error — Fatal error (red). Prints message and exits with code 1.
+# log_error — Fatal error (red [X]). Prints message and exits with code 1.
 log_error() {
-  local msg="$*"
-  echo -e "${COLOR_RED:-\033[0;31m}[ERROR]${COLOR_RESET:-\033[0m} $msg" >&2
-  _log_raw "ERROR" "$msg"
+  _log_emit 2 "${COLOR_BG_RED:-\033[41m}" "[X]" "${COLOR_RED:-\033[0;31m}" "ERROR" "$@" >&2
   exit 1
 }
 
-# log_success — Operation completed successfully (green)
+# log_success — Operation completed successfully (green [V])
 log_success() {
-  local msg="$*"
-  echo -e "${COLOR_GREEN:-\033[0;32m}[OK]${COLOR_RESET:-\033[0m}    $msg"
-  _log_raw "OK   " "$msg"
+  _log_emit 1 "${COLOR_BG_GREEN:-\033[42m}" "[V]" "${COLOR_GREEN:-\033[0;32m}" "OK   " "$@"
 }
 
-# log_section — Print a visual section header (bold)
+# log_section — Boxed section header (bold cyan ╔═╗ box, like .bash_env's
+# log_banner). Borders auto-size to the title length; plain box when piped.
 log_section() {
   local title="$*"
-  local line="$(printf '%0.s─' {1..60})"
-  echo -e "\n${COLOR_BOLD:-\033[1m}${line}${COLOR_RESET:-\033[0m}"
-  echo -e "${COLOR_BOLD:-\033[1m}  $title${COLOR_RESET:-\033[0m}"
-  echo -e "${COLOR_BOLD:-\033[1m}${line}${COLOR_RESET:-\033[0m}\n"
+  local bar
+  bar=$(printf '═%.0s' $(seq 1 $(( ${#title} + 2 ))))
+  if _log_color 1; then
+    echo -e "\n${COLOR_BOLD:-\033[1m}${COLOR_CYAN:-\033[0;36m}╔${bar}╗${COLOR_RESET:-\033[0m}"
+    echo -e "${COLOR_BOLD:-\033[1m}${COLOR_CYAN:-\033[0;36m}║ ${title} ║${COLOR_RESET:-\033[0m}"
+    echo -e "${COLOR_BOLD:-\033[1m}${COLOR_CYAN:-\033[0;36m}╚${bar}╝${COLOR_RESET:-\033[0m}\n"
+  else
+    printf '\n╔%s╗\n║ %s ║\n╚%s╝\n\n' "$bar" "$title" "$bar"
+  fi
   _log_raw "SECT " "=== $title ==="
 }

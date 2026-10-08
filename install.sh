@@ -52,7 +52,7 @@ while [[ $# -gt 0 ]]; do
     --help | -h)
       echo "Usage: sudo bash install.sh [--all | --module <name> | --help]"
       echo ""
-      echo "Available modules: system  network  db  project  iso  aliases"
+      echo "Available modules: system  system/aliases  system/claude  network  db  project  iso"
       exit 0
       ;;
     *)

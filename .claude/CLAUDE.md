@@ -60,3 +60,30 @@ If you genuinely think a convention is harmful, surface it. Don't fork silently.
 "Completed" is wrong if anything was skipped silently.
 "Tests pass" is wrong if any were skipped.
 Default to surfacing uncertainty, not hiding it.
+
+---
+
+# Project-specific rules (this repo)
+
+These extend the template above with boundaries specific to this dotfiles
+repo. When the template gets upgraded, keep this section.
+
+## P1 — Reuse within a layer before writing anything new
+Before adding a shell function or script, search the layer it belongs to for
+an existing implementation and reuse it directly:
+- Interactive runtime layer: `configs/alias/` (.bash_env / .bash_functions /
+  .bash_git / .bash_pkg / .bash_nginx)
+- Deploy-time layer: `install.sh`, `lib/`, `system/` and other module scripts
+Same capability twice in the same layer is a defect (Rule 8 applied to shell).
+
+## P2 — Layers are deliberately separate; never source across them
+`lib/` and `configs/alias/` look similar (both have log helpers) but carry
+different contracts. This duplication is intentional — do NOT unify it:
+- `lib/log.sh` (deploy-time): must be self-contained (runs before anything is
+  deployed), writes to `logs/*.log`, `log_error` exits 1 (fail loud).
+- `configs/alias/.bash_env` log_* (interactive runtime): terminal output only,
+  never writes files, never exits (exiting would kill the user's shell).
+Deploy scripts must not source `configs/alias/`; alias modules must not
+source `lib/`. Tests (`tests/`) source neither — a test harness must not
+depend on the code under test. Keep the two log APIs aligned in naming and
+color style only; implementations stay independent.
