@@ -1,0 +1,13 @@
+# /etc/cron.d/dotfiles-maint -- deployed by dotfiles (modules/maint); edits are overwritten.
+# No dot in this file's name: Debian's cron silently skips cron.d files that have one.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# m  h  dom mon dow  user  command
+# Clock: after boot (once the network is up), then every 10 minutes; acts only when unsynced
+@reboot              root  sleep 60 && /usr/local/sbin/ntp-sync.sh >> /var/log/dotfiles/ntp-sync.log 2>&1
+*/10 *  *   *   *    root  /usr/local/sbin/ntp-sync.sh >> /var/log/dotfiles/ntp-sync.log 2>&1
+
+# Packages and disk: every day at 08:45, and after a reboot
+45   8  *   *   *    root  /usr/local/sbin/sys-maint.sh >> /var/log/dotfiles/sys-maint.log 2>&1
+@reboot              root  sleep 120 && /usr/local/sbin/sys-maint.sh >> /var/log/dotfiles/sys-maint.log 2>&1

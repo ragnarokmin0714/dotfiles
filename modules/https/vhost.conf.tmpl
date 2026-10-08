@@ -1,0 +1,24 @@
+# Deployed by dotfiles (modules/https) -- edits are overwritten.
+# Rendered from modules/https/vhost.conf.tmpl with the NGINX_* / SSL_* settings.
+
+server {
+    listen      __NGINX_HTTP_PORT__;
+    server_name __NGINX_SERVER_NAME__;
+    return 301  https://$host:__NGINX_HTTPS_PORT__$request_uri;
+}
+
+server {
+    listen              __NGINX_HTTPS_PORT__ ssl;
+    server_name         __NGINX_SERVER_NAME__;
+
+    ssl_certificate     __SSL_CERT_FILE__;
+    ssl_certificate_key __SSL_KEY_FILE__;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    root  __NGINX_WEB_ROOT__;
+    index index.html index.htm;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+}

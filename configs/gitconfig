@@ -1,0 +1,21 @@
+# System-wide git defaults (dotfiles modules/shell): a managed block in /etc/gitconfig.
+# No [user] here -- identity belongs in each person's ~/.gitconfig, which wins anyway.
+[core]
+	editor = vim
+	autocrlf = input
+	whitespace = fix,-indent-with-non-tab,trailing-space,cr-at-eol
+[color]
+	ui = auto
+[init]
+	defaultBranch = main
+[pull]
+	rebase = false
+[push]
+	default = current
+[fetch]
+	prune = true
+[alias]
+	st = status -sb
+	lg = log --oneline --graph --decorate --all
+	undo = reset --soft HEAD~1
+	aliases = config --get-regexp ^alias\\.

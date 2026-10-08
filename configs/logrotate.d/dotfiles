@@ -1,0 +1,16 @@
+# /etc/logrotate.d/dotfiles -- deployed by dotfiles (modules/maint); edits are overwritten.
+# Rotates the maintenance logs. They live in their own root-owned directory, not in
+# /var/log itself: Ubuntu's /var/log is group-writable (root:syslog), and logrotate
+# refuses to rotate there without a `su` directive. Deploy run logs sit one level down
+# (install/) and are not matched here.
+/var/log/dotfiles/*.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root root
+    dateext
+    dateformat -%Y-%m-%d
+}

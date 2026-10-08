@@ -1,0 +1,22 @@
+# /etc/sudoers.d/dotfiles-<user> -- rendered and deployed by dotfiles (modules/sudo);
+# edits are overwritten. Validated with `visudo -cf` before it is installed.
+#
+# Passwordless sudo for __DEPLOY_USER__, for the commands the dotfiles helpers run.
+# Paths for both families are listed; sudo ignores commands that do not exist.
+#
+# READ BEFORE ENABLING: package managers and docker are root-equivalent -- a package
+# can run any script as root, and `docker run -v /:/host` reads and writes the whole
+# disk. Granting them NOPASSWD is granting root without a password. Remove those lines
+# on a host where that matters; the service and network lines are narrower.
+
+# Services
+__DEPLOY_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start *, /usr/bin/systemctl stop *, \
+    /usr/bin/systemctl restart *, /usr/bin/systemctl reload *, /usr/bin/systemctl status *, \
+    /usr/bin/systemctl enable *
+
+# Network
+__DEPLOY_USER__ ALL=(root) NOPASSWD: /usr/sbin/netplan apply, /usr/bin/nmcli, /usr/sbin/ufw, /usr/bin/firewall-cmd
+
+# Root-equivalent (see above): containers and packages
+__DEPLOY_USER__ ALL=(root) NOPASSWD: /usr/bin/docker
+__DEPLOY_USER__ ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt, /usr/bin/dnf
