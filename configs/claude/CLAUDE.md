@@ -1,7 +1,7 @@
 # CLAUDE.md — Global Personal Rules
 
-Personal cross-project rules, deployed to `~/.claude/CLAUDE.md` by
-`system/claude.sh`. They apply in every project and every session; a
+Personal cross-project rules, deployed to `~/.claude/CLAUDE.md` by the
+dotfiles `claude` module (`install.sh claude`). They apply in every project and every session; a
 project's own CLAUDE.md wins on conflict.
 
 ## Git commit convention (Conventional Commits)

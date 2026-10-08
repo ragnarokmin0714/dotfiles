@@ -1,485 +1,157 @@
 # dotfiles
 
-> Personal Linux environment automation — deploy network, databases, project tooling, shell config, and build custom ISOs with a single command.
+Linux environment automation for Ubuntu and the RHEL family: one shell library every
+user gets, and a deploy tool that sets a host up — packages, maintenance jobs, sudo,
+databases, Docker, Node, network, HTTPS — module by module.
 
----
-
-## Distro Support
-
-| Module | Ubuntu / Debian | Rocky Linux / RHEL |
-|---|---|---|
-| System — packages | ✅ apt | ✅ dnf + EPEL |
-| System — firewall | ✅ ufw | ✅ firewalld |
-| Network — static IP | ✅ Netplan | ✅ nmcli |
-| Network — DNS | ✅ systemd-resolved | ✅ NetworkManager |
-| Network — firewall | ✅ ufw | ✅ firewalld |
-| Network — HTTPS | ✅ nginx + openssl | ✅ nginx + openssl |
-| DB — PostgreSQL | ✅ PGDG apt | ✅ PGDG dnf |
-| DB — MySQL | ✅ apt + debconf | ✅ dnf + temp-pass |
-| DB — Redis | ✅ redis.io apt | ✅ EPEL |
-| Project — Docker | ✅ Docker apt | ✅ Docker dnf (centos) |
-| Project — Go | ✅ official tarball | ✅ official tarball |
-| Project — Python | ✅ apt | ✅ dnf |
-| ISO build | ✅ preseed | ⚠️ xorriso only (no kickstart) |
-| Shell aliases | ✅ | ✅ |
-
-> **Distro detection** is automatic via `lib/env.sh` (`$DISTRO_FAMILY`: `debian` or `rhel`).
-
----
-
-## Table of Contents
-
-- [Requirements](#requirements)
-- [Quick Start](#quick-start)
-- [Configuration](#configuration)
-- [Usage](#usage)
-- [Menu Options](#menu-options)
-- [Project Structure](#project-structure)
-- [Module Reference](#module-reference)
-  - [System](#system-module)
-  - [Network](#network-module)
-  - [HTTPS Deployment](#https-deployment-module)
-  - [Database](#database-module)
-  - [Project Environment](#project-environment-module)
-  - [ISO Build](#iso-build-module)
-- [Logging](#logging)
-- [Adding a New Module](#adding-a-new-module)
-
----
-
-## Requirements
-
-| Requirement | Notes |
-|---|---|
-| OS | Ubuntu 20.04+ / Debian 11+ **or** Rocky Linux 8+ / RHEL 8+ (amd64 or arm64) |
-| Shell | `bash` 4.0+ |
-| Privileges | Most modules require `sudo` / root |
-| Network | Internet access required for package downloads |
-
----
-
-## Quick Start
-
-```bash
-# 1. Clone this repository
-git clone https://github.com/YOUR_USERNAME/dotfiles.git ~/dotfiles
-cd ~/dotfiles
-
-# 2. Edit global configuration (REQUIRED before first run)
-vim lib/env.sh
-
-# 3. Run the interactive menu
-sudo bash install.sh
+```
+configs/alias/  ── the runtime library ──►  /etc/profile.d/.alias  (every interactive bash,
+      ▲                                                             cron scripts too)
+      │ sourced from the repo
+install.sh ─► lib/core.sh + lib/deploy.sh ─► modules/<name>/main.sh ─► the host
 ```
 
----
+One implementation of everything shared: the deploy tool sources the repo copy of the
+same library users run, so platform detection, logging, menus and package handling exist
+once.
+
+## Supported systems
+
+| Family | Releases | Package manager | System bashrc |
+|---|---|---|---|
+| debian | Ubuntu 20.04+, Debian 11+ | apt | `/etc/bash.bashrc` |
+| rhel | RHEL 9+, Rocky 9+, Alma 9+ | dnf (+ EPEL/CRB) | `/etc/bashrc` |
+
+Detected from `/etc/os-release`. Deploys refuse anything else unless `DF_FORCE=1`.
+CI runs the test suites in Ubuntu 20.04, 22.04 and 24.04, Rocky 9 and RHEL 9 (UBI) containers.
+
+## Quick start
+
+```bash
+git clone https://github.com/ragnarokmin0714/dotfiles.git ~/dotfiles && cd ~/dotfiles
+bash install.sh --list                    # what there is
+bash install.sh -n packages shell maint   # what it would do -- changes nothing, no root needed
+sudo bash install.sh packages shell maint # do it
+sudo bash install.sh                      # or pick modules from a menu
+```
+
+After `shell`, every new interactive bash on the host has the library, and
+`dotfiles <args>` runs this installer from anywhere (`dotfiles shell` after editing
+`configs/alias/`).
+
+## install.sh
+
+```
+install.sh [options] [module...]     no module: pick from a menu
+  -l, --list       list modules
+  -a, --all        every module not marked [manual]
+  -n, --dry-run    show every change, make none
+  -y, --yes        answer yes to every question
+      --root DIR   sandbox: write files under DIR, run no commands
+```
+
+- Modules run in their fixed order, whatever order you name them in; the first failure
+  stops the run.
+- Every run is logged: `/var/log/dotfiles/install/` as root, otherwise
+  `~/.local/state/dotfiles/install/`.
+- Every file a run replaces is backed up first, under `/var/backups/dotfiles/<run>/`.
+- Re-running is safe: a second run reports everything `unchanged`.
+- Try the RHEL code paths on an Ubuntu box:
+  `OS_FAMILY=rhel OS_ID=rocky OS_VERSION=9.4 bash install.sh -n --all`
+
+## Modules
+
+| Module | What it does | `--all` |
+|---|---|---|
+| `packages` | build tools, certificates, archivers, and the CLI toolkit (`SYS_TOOLKIT`: git, curl, jq, htop, lnav); EPEL + CRB on the RHEL family | ✔ |
+| `shell` | the library → `/etc/profile.d/.alias`; a managed hook block in the system bashrc; git defaults in `/etc/gitconfig` | ✔ |
+| `maint` | `/usr/local/sbin/{sys-maint,ntp-sync}.sh`, `/etc/cron.d/dotfiles-maint`, `/etc/logrotate.d/dotfiles`, logs in `/var/log/dotfiles` | ✔ |
+| `claude` | Claude Code config → `~/.claude` of the deploy user (only what dotfiles put there is ever removed) | ✔ |
+| `docker` | Docker CE + compose/buildx from Docker's repo; deploy user joins `docker` | ✔ |
+| `node` | nvm + Node (LTS) + pnpm for the deploy user | ✔ |
+| `python` | python3, pip, venv | ✔ |
+| `go` | Go from go.dev, SHA-256 verified | ✔ |
+| `sudo` | NOPASSWD rules for the deploy user — includes root-equivalent grants, read the template | manual |
+| `postgres` / `mysql` / `redis` | servers, plus `DB_NAME` / `DB_USER` (password from `config.local.sh`) | manual |
+| `network` / `firewall` / `https` | static IP + DNS; declarative firewall (22 required); nginx with a self-signed cert | manual |
+| `iso` | experimental: repack a Debian-installer ISO with preseed | manual |
+
+## The shell library
+
+Each module of `configs/alias/` covers one area. Commands take their input as arguments
+and open a menu only when something is missing and there is a terminal. Destructive steps
+ask first (`-y` answers yes), and `-n` previews. `<command> -h` prints usage.
+
+| Module | Commands (aliases) |
+|---|---|
+| `.bash_env` | platform globals (`OS_FAMILY`, `PKG_MGR`, `SUDO`, paths, `GIT_*`, `SYS_TOOLKIT`), `log_ok/err/warn/info/step/head/banner`, `path_add` |
+| `.bash_ui` | `radioselect`, `multiselect`, `confirm`, `ask`, `ui_tty` — every question goes through these |
+| `.bash_functions` | `dotfiles`, `sys_update` (`sup`), `sys_maintain` (`sys-maint`), `ntp-sync/-status/-fix`, `tz`, `find_path` (`fp`), `free_mem` (`fm`), `run_project` (`run-prj`), `stop_dev`, `rs`, `lh*`, `svc-*` |
+| `.bash_pkg` | `pkg_installed` (`pi`), `pkg_ensure` (`pe`), `pkg_remove` (`prm`), `pkg_install`, `pkg_enable_epel`, `sys_toolkit` (`toolkit`), `pkg_unused` (`pun`), `ensure_shfmt` |
+| `.bash_disk` | `disk_status` (`ds`), `disk_usage_top` (`dut`), `clean_up_disk` (`cud`), `clean_home_caches` (`chc`), `disk_grow` (`dg`) |
+| `.bash_git` | `gfm`, `gswp`, `gcr`, `gpcb`, `gcmb`, `gds`, `grd`, `gfl`, `amend`, `gpm`, `safe-push` |
+| `.bash_prompt` | the `[user(group)@host:ip dir (branch hash status)]$` prompt |
+| `.bash_nginx`, `.bash_mongo`, `.bash_nvm` | `ngs`/`ngtr`/`ngl`; `mdb*` (configured in `.bash_local`); `nvm-i`/`nvm-uni`/`nvm-up` |
 
 ## Configuration
 
-All global variables are centralized in **`lib/env.sh`**. Edit this file before running any module.
-
-Key settings to review:
-
-```bash
-# Network
-NETWORK_INTERFACE="eth0"     # Run `ip a` to find your interface name
-STATIC_IP="192.168.1.100"    # Leave empty to skip static IP setup
-GATEWAY="192.168.1.1"
-
-# Database
-DB_ROOT_PASSWORD="changeme"  # ← Change this
-DB_USER="appuser"
-DB_PASSWORD="changeme"       # ← Change this
-DB_NAME="appdb"
-
-# Node.js
-NODE_VERSION="20"
-PNPM_VERSION="10"
-
-# HTTPS / Nginx
-NGINX_SERVER_NAME="example.com"  # Domain or hostname
-NGINX_HTTP_PORT=80
-NGINX_HTTPS_PORT=443
-SSL_DAYS=365
-SSL_COUNTRY="TW"
-SSL_STATE="Taiwan"
-SSL_CITY="Taipei"
-SSL_ORG="MyOrg"
-
-# ISO
-ISO_SOURCE="/path/to/ubuntu.iso"
-ISO_OUTPUT_DIR="$HOME/iso-build"
-```
-
-> **Security**: Never commit real passwords to version control. Consider using environment variables or a secrets manager for sensitive values.
-
----
-
-## Usage
-
-### Interactive menu (recommended)
-
-```bash
-sudo bash install.sh
-```
-
-Displays a numbered menu. Enter a number to run the corresponding module.
-
-### Run a specific module directly
-
-```bash
-sudo bash install.sh --module system
-sudo bash install.sh --module network
-sudo bash install.sh --module network/https
-sudo bash install.sh --module db
-sudo bash install.sh --module project
-sudo bash install.sh --module iso
-```
-
-### Run all modules sequentially
-
-```bash
-sudo bash install.sh --all
-```
-
-Runs modules in this order: `system` → `aliases` → `network` → `db` → `project`.
-(ISO is excluded from `--all` since it requires a source ISO file.)
-
-### Help
-
-```bash
-bash install.sh --help
-```
-
----
-
-## Menu Options
-
-When you run `sudo bash install.sh`, you will see:
-
-```
-  ██████╗  ██████╗ ████████╗███████╗██╗██╗     ███████╗███████╗
-  ...
-  Linux Environment Automation — v1.0.0
-  Running as: root on hostname
-
-Select a module to run:
-1) System Setup      (sudo, bashrc, apt packages)
-2) Network Setup     (static IP, DNS, firewall)
-3) HTTPS Setup       (nginx install/reinstall + OpenSSL self-signed cert)
-4) Database Setup    (PostgreSQL, MySQL, Redis)
-5) Project Env Setup (Node.js, pnpm, Docker)
-6) ISO Build         (build custom Linux ISO)
-7) Shell Aliases     (deploy ~/.alias/ prompt + git + utils)
-8) Run ALL Modules   (full environment deployment)
-9) Quit
-```
-
-| Option | Description |
-|---|---|
-| **1 — System Setup** | Installs base apt packages, configures sudo rules, deploys `.bashrc` |
-| **2 — Network Setup** | Sets static IP (optional), configures DNS, ufw firewall, then HTTPS |
-| **3 — HTTPS Setup** | Installs/reinstalls nginx, generates self-signed SSL cert via openssl, configures HTTPS virtual host |
-| **4 — Database Setup** | Installs and configures PostgreSQL, MySQL, Redis |
-| **5 — Project Env Setup** | Installs Docker, Node.js via nvm, pnpm, Python, Go |
-| **6 — ISO Build** | Builds a custom bootable Linux ISO with preseed for unattended install |
-| **7 — Shell Aliases** | Deploys `~/.alias/` shell modules (prompt, git helpers, utility functions) |
-| **8 — Run ALL** | Runs options 1–5 sequentially |
-| **9 — Quit** | Exit the setup tool |
-
----
-
-## Project Structure
-
-```
-dotfiles/
-├── install.sh                  # Main entry point — interactive menu or --all/--module
-├── .gitignore
-├── README.md
-│
-├── lib/                        # Shared utilities (sourced by all modules)
-│   ├── env.sh                  # Global constants — EDIT THIS before running
-│   ├── log.sh                  # Logging functions (info/warn/error/success)
-│   └── menu.sh                 # Interactive menu renderer
-│
-├── system/                     # Linux system configuration
-│   ├── setup.sh                # Module entry point
-│   ├── packages.sh             # Install base apt packages
-│   ├── sudo.sh                 # Configure /etc/sudoers.d/ rules
-│   ├── bashrc.sh               # Deploy .bashrc template + ~/.alias/ to user home
-│   └── aliases.sh              # Deploy ~/.alias/ shell modules (standalone)
-│
-├── network/                    # Network configuration
-│   ├── setup.sh                # Module entry point (runs all 4 steps)
-│   ├── static-ip.sh            # Configure static IP via Netplan / nmcli
-│   ├── dns.sh                  # Configure DNS via systemd-resolved / NetworkManager
-│   ├── firewall.sh             # Configure ufw / firewalld rules
-│   └── https.sh                # Install nginx, generate SSL cert, deploy HTTPS vhost
-│
-├── db/                         # Database installation
-│   ├── setup.sh                # Module entry point
-│   ├── postgres.sh             # PostgreSQL (PGDG official repo)
-│   ├── mysql.sh                # MySQL (non-interactive install)
-│   └── redis.sh                # Redis (official repo, localhost-only binding)
-│
-├── project/                    # Development toolchain
-│   ├── setup.sh                # Module entry point
-│   ├── docker.sh               # Docker CE + Compose plugin
-│   ├── frontend.sh             # Node.js via nvm + pnpm
-│   └── backend.sh              # Python 3 + pip, Go
-│
-├── iso/                        # ISO builder
-│   ├── build.sh                # Build custom bootable ISO via xorriso
-│   └── preseed.cfg             # Debian/Ubuntu unattended install config
-│
-├── configs/                    # Configuration file templates
-│   ├── .bashrc                 # Bash config with aliases, nvm, pnpm, Git prompt
-│   ├── .gitconfig              # Git global config template
-│   ├── sudoers.d/
-│   │   └── 99-dotfiles         # sudoers drop-in template (__USER__ placeholder)
-│   └── alias/                  # Shell alias modules (deployed to ~/.alias/)
-│       ├── .bash_aliases       # Entry point — sources the 3 modules below
-│       ├── .bash_env           # ANSI STYLE map, styled(), git_prompt(), build_ps1()
-│       ├── .bash_git           # Git aliases + interactive branch functions
-│       └── .bash_functions     # System/disk/project utility functions
-│
-└── logs/                       # Runtime logs (gitignored, auto-created)
-    └── .gitkeep
-```
-
----
-
-## Module Reference
-
-### System Module
-
-**Entry point:** `system/setup.sh`
-
-Runs three sub-scripts in order:
-
-| Script | What it does |
-|---|---|
-| `packages.sh` | Installs base tools. Ubuntu: `apt-get` (`build-essential`, `ufw`, etc.). Rocky: `dnf` (`gcc`, `gcc-c++`, `make`, `firewalld`, etc.) + enables EPEL. |
-| `sudo.sh` | Deploys `configs/sudoers.d/99-dotfiles` to `/etc/sudoers.d/`. Validates with `visudo -c` before activating. |
-| `bashrc.sh` | Backs up existing `~/.bashrc`, copies `configs/.bashrc` to the deploy user's home, then deploys `configs/alias/` to `~/.alias/`. |
-
----
-
-### Shell Aliases Module
-
-**Entry point:** `system/aliases.sh`
-**Menu option:** 7
-**Can also run standalone:** `sudo bash system/aliases.sh`
-
-Deploys four shell script files from `configs/alias/` to `~/.alias/` and ensures `~/.bashrc` sources the entry point.
-
-| File | What it does |
-|---|---|
-| `.bash_aliases` | Entry point — sources the three modules below using `$_ALIAS_DIR` (portable, no hardcoded paths) |
-| `.bash_env` | `declare -A STYLE` with 30+ ANSI codes; `styled()` helper; `git_prompt()` with 9 status symbols; `build_ps1()` sets the custom PS1 |
-| `.bash_git` | `amend`, `safe-push`, `amend-safe-push`, `git-undo`, `git-drop`, `gfm`, `gpm`, `gfp`, `gfap` aliases; `gswp` (interactive branch switch + pull); `gpcb` (push current branch with confirmation); `gcr` (checkout remote-only branch) |
-| `.bash_functions` | System utils, ls variants, service management, datetime, NTP, `get_ip`, `find_path (fp)`, `disk_usage_top (dut)`, `clean_up_disk (cud)`, `sys_update (sup)`, `sys_maintain`, `run_project`, `pkg_installed (pi)`, `pkg_ensure (pe)` |
-
-**`.bash_git` aliases reference:**
-
-| Alias | Command | Description |
+| Where | What | Committed |
 |---|---|---|
-| `amend` | `git commit --amend --no-edit` | Amend last commit without changing message |
-| `safe-push` | `git push --force-with-lease` | Force push safely (won't overwrite others' work) |
-| `amend-safe-push` | amend + safe-push | Amend and force push in one step |
-| `git-undo` | `git reset --soft HEAD~1` | Undo last commit, keep changes staged |
-| `git-drop` | `git reset --hard HEAD~1` | Undo last commit, discard all changes |
-| `gfm` | `git fetch origin main && git merge origin/main` | Fetch + merge from origin/main |
-| `gpm` | `git pull origin main` | Pull from origin/main |
-| `gfp` | `git fetch --prune` | Fetch and prune stale refs |
-| `gfap` | `git fetch --all --prune` | Fetch all remotes and prune |
-| `gswp` | `git_switch_and_pull` | Interactively switch branch + pull |
-| `gpcb` | `git_push_current_branch` | Push current branch with confirmation |
-| `gcr` | `git_checkout_remote` | Checkout a remote-only branch interactively |
+| `config.sh` | deploy settings with safe defaults (ports, versions, DB names...) | yes |
+| `config.local.sh` | this host's settings and secrets, sourced last — start from `config.local.example.sh` | no |
+| `/etc/profile.d/.alias/.bash_local` | per-host library settings (project paths, extra aliases), loaded before the modules; never overwritten by a deploy — see `configs/alias/.bash_local.example` | no |
 
-**`.bash_functions` highlights:**
+Any `config.sh` value can also be overridden for one run from the environment:
+`NODE_VERSION=20 sudo -E bash install.sh node`.
 
-| Category | Aliases / Functions |
-|---|---|
-| ls variants | `lh`, `lhu`, `lhc`, `lhs`, `lhx`, `lhtr`, `lht` |
-| Service mgmt | `svc-running`, `svc-failed`, `svc-all`, `svc-count`, `svc-status` |
-| Datetime | `now` (datetime), `today` (date), `time-now` (time) |
-| NTP | `ntp-sync`, `ntp-status`, `ntp-fix` |
-| Network | `netstats`, `sss`, `get-ip` |
-| File search | `fp` (`find_path`) |
-| Disk | `dut` (`disk_usage_top`), `cud` (`clean_up_disk`) |
-| System update | `sup` (`sys_update`), `sys-maint` (`sys_maintain`) |
-| Package check | `pi` (`pkg_installed`), `pe` (`pkg_ensure`) |
-| Project | `run-dev`, `run-prod`, `run-prj`, `stop-dev` |
+## Layout
 
-**Distro support in `.bash_functions`:**
+```
+install.sh                  entry point: menu / module names / -n / --root / --all
+config.sh                   deploy settings (config.local.sh overrides, gitignored)
+lib/core.sh                 bootstrap: strict mode, the library, settings, die, df_run
+lib/deploy.sh               df_install, df_install_dir, df_block, df_render, validators
+modules/<name>/main.sh      one module each; header: @desc, @order, @manual
+configs/alias/              the runtime library        -> /etc/profile.d/.alias
+configs/sbin/               maintenance scripts         -> /usr/local/sbin
+configs/cron.d/             schedule                    -> /etc/cron.d
+configs/logrotate.d/        log rotation                -> /etc/logrotate.d
+configs/sudoers.d/          sudoers template            -> /etc/sudoers.d
+configs/gitconfig           git defaults                -> /etc/gitconfig (managed block)
+configs/claude/             Claude Code config          -> ~/.claude
+tests/                      lint.sh, smoke.sh, deploy.sh; run.sh runs them all
+```
 
-| Function | Ubuntu / Debian | Rocky Linux / RHEL |
-|---|---|---|
-| `clean_up_disk` | `apt-get clean/autoremove`, removes old kernels | `dnf clean all/autoremove/remove --oldinstallonly` |
-| `sys_update` | `apt update && apt upgrade` | `dnf update` |
-| `pkg_installed` | `dpkg -l` | `dnf list installed` |
-| `pkg_ensure` | `apt install` | `dnf install` |
+## Extending
 
-Writes the following block to `/etc/bashrc` (system-wide). If the block already exists it is removed first, then re-inserted — so re-running the script is always safe:
+- **A command**: add it to the `configs/alias/` module for its area, then follow the
+  convention in `.bash_ui`'s header:
+  - arguments and flags first, with `-h`;
+  - `radioselect`/`multiselect`/`ask` only as the fallback when input is missing and
+    there is a terminal;
+  - `confirm` before anything destructive;
+  - `$SUDO` for root.
+  - Option letters are listed in `.bash_aliases`.
+- **A module**: create `modules/<name>/main.sh` with `# @desc` and `# @order`, source
+  `lib/core.sh`, and call `df_module_start`.
+  - Write files only through `lib/deploy.sh`, and run commands through `df_run`, so
+    `-n` and `--root` stay truthful.
+  - It shows up in the menu and in `--list` by itself.
+
+`.claude/CLAUDE.md` holds the full rules.
+
+## Tests
 
 ```bash
-# --- Shell alias modules (~/.alias/) ---
-# Sources .bash_env (STYLE/git_prompt/build_ps1), .bash_git, .bash_functions
-[ -f ~/.alias/.bash_aliases ] && source ~/.alias/.bash_aliases
-
-# Rebuild the custom PS1 before each prompt
-PROMPT_COMMAND=build_ps1
+bash tests/run.sh      # lint + smoke + deploy, no root needed
 ```
 
-**Prompt layout:**
-```
-[roger(staff)@hostname:192.168.1.10 ~/project (main abc123 ✔)]$
-[root(root)@hostname:192.168.1.10  ~/project (main abc123 ✔)]#
-```
-
----
-
-### Network Module
-
-**Entry point:** `network/setup.sh`
-
-| Script | What it does |
-|---|---|
-| `static-ip.sh` | Ubuntu: writes Netplan YAML + `netplan apply`. Rocky: configures via `nmcli` (NetworkManager). Skipped if `STATIC_IP` is empty. |
-| `dns.sh` | Ubuntu: writes `/etc/systemd/resolved.conf` + restarts `systemd-resolved`. Rocky: writes `/etc/NetworkManager/conf.d/dotfiles-dns.conf` + `/etc/resolv.conf`, restarts NetworkManager. |
-| `firewall.sh` | Ubuntu: `ufw` (default-deny, opens `FIREWALL_ALLOW_PORTS`). Rocky: `firewalld` (same port list, permanent rules, `firewall-cmd --reload`). |
-| `https.sh` | Installs/reinstalls nginx, generates a self-signed SSL cert+key via openssl, writes an HTTPS virtual host config, enables and restarts nginx. |
-
-> **Warning:** Ensure port 22 is in `FIREWALL_ALLOW_PORTS` before running `firewall.sh` to prevent SSH lockout.
-
----
-
-### HTTPS Deployment Module
-
-**Entry point:** `network/https.sh`
-**Menu option:** 3
-**Can also run standalone:** `sudo bash network/https.sh`
-
-Deploys HTTPS on the server in four steps:
-
-| Step | What it does |
-|---|---|
-| 1 — Install nginx | Ubuntu: `apt-get install --reinstall nginx` (reinstall) or `apt-get install nginx` (fresh). Rocky: `dnf reinstall nginx` or `dnf install nginx`. |
-| 2 — Generate SSL cert | Runs `openssl req -x509` to create a 2048-bit RSA self-signed certificate and private key. Validity and subject fields are controlled by `SSL_*` variables in `lib/env.sh`. |
-| 3 — Write nginx config | Ubuntu: writes to `/etc/nginx/sites-available/dotfiles-https.conf`, symlinks to `sites-enabled/`, removes the default site. Rocky: writes to `/etc/nginx/conf.d/dotfiles-https.conf`. |
-| 4 — Enable nginx | `systemctl enable nginx && systemctl restart nginx`. Validates config with `nginx -t` before restarting. |
-
-**nginx virtual host behaviour:**
-- HTTP (port `NGINX_HTTP_PORT`) → 301 redirect to HTTPS
-- HTTPS (port `NGINX_HTTPS_PORT`) → serves `/var/www/html`, TLS 1.2/1.3 only
-
-**Key variables in `lib/env.sh`:**
-
-```bash
-NGINX_SERVER_NAME="localhost"   # Set to your real domain before running
-NGINX_HTTP_PORT=80
-NGINX_HTTPS_PORT=443
-SSL_CERT_DIR="/etc/ssl/certs"
-SSL_KEY_DIR="/etc/ssl/private"
-SSL_DAYS=365
-SSL_COUNTRY="TW"
-SSL_STATE="Taiwan"
-SSL_CITY="Taipei"
-SSL_ORG="dotfiles"
-```
-
-> **Note:** The generated certificate is **self-signed** and will trigger browser warnings. For production, replace the cert/key files with those issued by a trusted CA (e.g. Let's Encrypt `certbot`) — the nginx config path does not change.
-
----
-
-### Database Module
-
-**Entry point:** `db/setup.sh`
-
-| Script | What it does |
-|---|---|
-| `postgres.sh` | Ubuntu: PGDG apt repo. Rocky: PGDG dnf repo + `initdb`. Both: creates `DB_NAME` database and `DB_USER` role. |
-| `mysql.sh` | Ubuntu: debconf preseed + apt. Rocky: MySQL official dnf repo + automatic temp-password rotation. Both: creates `DB_NAME` / `DB_USER`. |
-| `redis.sh` | Ubuntu: official Redis apt repo. Rocky: EPEL. Both: binds to `127.0.0.1`, configures `REDIS_PORT`. |
-
----
-
-### Project Environment Module
-
-**Entry point:** `project/setup.sh`
-
-| Script | What it does |
-|---|---|
-| `docker.sh` | Ubuntu: Docker apt repo. Rocky: Docker dnf repo (`download.docker.com/linux/centos`). Both: installs CE + Compose plugin, adds `DEPLOY_USER` to `docker` group. |
-| `frontend.sh` | Installs nvm into `~/.nvm`, installs Node.js `NODE_VERSION`, sets it as default, installs pnpm globally. (Distro-agnostic.) |
-| `backend.sh` | Python 3 + pip: Ubuntu uses `apt`, Rocky uses `dnf`. Go: official tarball — distro-agnostic, auto-detects arch (`uname -m` → amd64/arm64). |
-
----
-
-### ISO Build Module
-
-**Entry point:** `iso/build.sh`
-
-Builds a customized bootable Linux ISO (preseed format — **Ubuntu/Debian source ISOs only**):
-
-1. Installs `xorriso`: Ubuntu → `apt` (`isolinux`); Rocky → `dnf` (`syslinux`)
-2. Extracts the source ISO specified by `ISO_SOURCE`
-3. Injects `iso/preseed.cfg` for fully automated unattended installation
-4. Patches the isolinux bootloader to auto-select preseed on boot
-5. Repacks everything into a new ISO using `xorriso`
-
-> **Note:** `preseed.cfg` is the Ubuntu/Debian installer mechanism. Rocky Linux uses `kickstart.cfg` instead — that workflow is not currently implemented in this script.
-
-**Write to USB after building:**
-```bash
-sudo dd if=~/iso-build/custom-linux-YYYYMMDD.iso of=/dev/sdX bs=4M status=progress && sync
-```
-
----
-
-## Logging
-
-Every module automatically writes a timestamped log file to `logs/`:
-
-```
-logs/
-└── 20260430_143022_setup.log
-```
-
-Log format:
-```
-[2026-04-30 14:30:22] [INFO ] Starting network setup...
-[2026-04-30 14:30:25] [OK   ] Static IP configured: 192.168.1.100 on eth0
-[2026-04-30 14:30:26] [WARN ] Interface eth1 not found
-[2026-04-30 14:30:27] [ERROR] Failed to apply Netplan config
-```
-
-Log files are excluded from version control via `.gitignore`.
-
----
-
-## Adding a New Module
-
-1. Create a directory: `mkdir my-module`
-2. Create `my-module/setup.sh` with this boilerplate:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-DOTFILES_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source "$DOTFILES_ROOT/lib/env.sh"
-source "$DOTFILES_ROOT/lib/log.sh"
-
-log_section "My Module"
-log_info "Doing something..."
-
-# Your installation logic here
-
-log_success "My module complete."
-```
-
-3. Make it executable: `chmod +x my-module/setup.sh`
-4. Add it to `lib/menu.sh` in the `options` array and `_run_all` function
-5. Add variables for it in `lib/env.sh`
+- `lint.sh`: `bash -n`, shellcheck, and policy checks for the conventions above (prompts
+  only through `.bash_ui`, `$SUDO` not `sudo`, module headers).
+- `smoke.sh`: the library in a clean strict-mode shell, with no terminal, on both families.
+- `deploy.sh`: real deploys into `--root` sandboxes. It covers:
+  - modes and validators;
+  - a second run changing nothing;
+  - host files kept, dropped files removed;
+  - refusal of broken input;
+  - dry runs of every module on Ubuntu 20.04/22.04, Rocky 9 and RHEL 9.

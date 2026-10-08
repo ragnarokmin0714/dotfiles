@@ -5,9 +5,11 @@
 > (agents / commands / skills / hooks / settings.json,
 > 以及 `settings.local.example.json` 個人設定範本 — 實際的
 > `settings.local.json` 屬個人本機檔,不進版控)。
-> 部署方式:`sudo bash system/claude.sh`(或 install.sh 選單第 8 項),
-> 會部署到 `~/.claude/`,僅覆蓋 agents/commands/skills/hooks/settings.json
-> 五項並先備份,不碰 sessions 等即時狀態。
+> 部署方式:`bash install.sh claude`(或 `sudo bash install.sh claude` 部署給
+> DEPLOY_USER),會部署到 `~/.claude/`,只管理 agents/commands/skills/hooks、
+> settings.json 與 CLAUDE.md,覆蓋前先備份;四個目錄各留一份
+> `.dotfiles-manifest`,只移除 dotfiles 自己放過的檔案,不碰 sessions、
+> plugin 或同步來的 skills 等其他內容。
 
 ```
 全域 ~/.claude/                          — 個人跨專案通用設定
