@@ -11,7 +11,7 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install shellcheck
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
       - run: bash tests/lint.sh
@@ -42,7 +42,7 @@ jobs:
             dnf install -y -q git sudo tar findutils file iproute procps-ng
             dnf install -y -q logrotate || echo "logrotate unavailable here -- its check will be skipped"
           fi
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Trust the workspace (the container user differs from its owner)
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - run: bash tests/smoke.sh

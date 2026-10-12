@@ -57,8 +57,13 @@ echo "== package names =="
 run "dnf: build-essential -> gcc gcc-c++ make" - '[[ "$(_pkg_name dnf build-essential)" == "gcc gcc-c++ make" ]]'
 run "apt: ShellCheck -> shellcheck" - '[[ "$(_pkg_name apt ShellCheck)" == shellcheck ]]'
 run "unmapped names pass through" - '[[ "$(_pkg_name apt jq)" == jq ]]'
-run "rhel dry run installs EPEL first, mapped names" "OS_FAMILY=rhel OS_ID=rocky OS_VERSION=9.4" \
-    'out=$(sys_toolkit -n); grep -q "epel-release" <<< "$out" && grep -q "dnf install -y git" <<< "$out"'
+# A probe package nothing has installed and a map entry of our own: the expected line is
+# the same on any host (a real RHEL host already has git, and rightly leaves it out).
+run "rhel dry run: EPEL first, then mapped names" "OS_FAMILY=rhel OS_ID=rocky OS_VERSION=9.4" \
+    'PKG_NAME_MAP[dnf:dotfiles-probe]="probe-a probe-b"
+     out=$(pkg_enable_epel -n; pkg_install -n dotfiles-probe)
+     grep -qE "epel-release|EPEL already enabled" <<< "$out" && grep -q "dnf install -y probe-a probe-b" <<< "$out"'
+run "the toolkit dry run succeeds" - 'sys_toolkit -n >/dev/null'
 run "RHEL itself enables CRB through subscription-manager" "OS_FAMILY=rhel OS_ID=rhel OS_VERSION=9.4" \
     'pkg_enable_epel -n | grep -q "subscription-manager repos --enable codeready-builder-for-rhel-9"'
 
@@ -82,6 +87,8 @@ run "clean_home_caches -n deletes nothing" - 'clean_home_caches -n >/dev/null'
 run "log helpers write the DOTFILES_LOG_FILE sink" - 'f=$(mktemp); DOTFILES_LOG_FILE=$f log_ok probe >/dev/null; grep -q "\[OK\] probe" "$f"; rm -f "$f"'
 run "prompt hook is added once and keeps PROMPT_COMMAND" - 'PROMPT_COMMAND=title; prompt_enable; prompt_enable; [[ $PROMPT_COMMAND == "build_ps1;title" ]]'
 run "build_ps1 sets a prompt" - 'build_ps1; [[ $PS1 == *"\\W"* ]]'
+# Minimal RHEL-family images have no `hostname`; neither may break the prompt
+run "the prompt survives without ip and hostname" - 'ip() { return 1; }; hostname() { return 127; }; build_ps1; [[ -z "$(get_ip)" ]]'
 
 echo ""
 echo "Assertions: ${pass} passed, ${fail} failed"

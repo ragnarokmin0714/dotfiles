@@ -78,10 +78,21 @@ alias netstats='netstat -tulpn'
 alias sss='ss -tulpn'
 
 # @name get_ip
-# @description Primary IPv4 address (first of hostname -I); empty when there is none.
+# @description Primary IPv4 address: the source address of the default route (iproute,
+#              present on every target), else the first of `hostname -I` -- which minimal
+#              RHEL-family images do not ship, and whose first address can be a docker
+#              bridge. Empty when there is none; never fails, since the prompt calls it.
 # @example get_ip
 get_ip() {
-    hostname -I 2>/dev/null | awk '{print $1}'
+    local ip=""
+    if command -v ip &>/dev/null; then
+        ip=$(ip -4 route get 1.1.1.1 2>/dev/null \
+            | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }') || ip=""
+    fi
+    if [[ -z "$ip" ]]; then
+        ip=$(hostname -I 2>/dev/null | awk '{print $1}') || ip=""
+    fi
+    echo "$ip"
 }
 alias get-ip='get_ip'
 
