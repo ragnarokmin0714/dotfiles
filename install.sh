@@ -96,6 +96,8 @@ mapfile -t selected < <(for n in "${selected[@]}"; do printf '%s %s\n' "${order[
 
 # --- Run ---------------------------------------------------------------------------
 df_need_os
+# Runs of one day share a log file: start each with a line that says which run it is
+printf '\n===== %s  install.sh %s  (pid %s) =====\n' "$(date "$NOW_FMT")" "${selected[*]}" "$$" >> "$DOTFILES_LOG_FILE"
 log_head "Plan: ${selected[*]}"
 (( DF_DRY_RUN )) && log_info "Dry run -- nothing will change"
 [[ -n "$DF_ROOT" ]] && log_info "Sandbox: ${DF_ROOT}"

@@ -59,10 +59,13 @@ DEPLOY_HOME="${DEPLOY_HOME:-/home/$DEPLOY_USER}"
 export DEPLOY_USER DEPLOY_HOME
 
 # @const DOTFILES_LOG_FILE
-# @description One log per install run, shared by every module it starts (exported):
-#              the runtime log_* append to it while the terminal stays colored.
-#              Root runs log under DOTFILES_LOG_DIR/install; others (dry runs, tests)
-#              under ~/.local/state/dotfiles/install.
+# @description One log per day, YYYYMMDD.log: every install run that day appends to it,
+#              and every module a run starts shares it (exported) -- the runtime log_*
+#              append to it while the terminal stays colored. install.sh opens each run
+#              with a separator line. Root runs log under DOTFILES_LOG_DIR/install,
+#              others (dry runs, tests) under ~/.local/state/dotfiles/install. Day files
+#              older than 90 days are removed (logrotate rotates the fixed-name
+#              maintenance logs one level up, not these).
 if [[ -z "${DOTFILES_LOG_FILE:-}" ]]; then
     if (( EUID == 0 )) && [[ -z "$DF_ROOT" ]]; then
         _df_log_dir="$DOTFILES_LOG_DIR/install"
@@ -70,7 +73,8 @@ if [[ -z "${DOTFILES_LOG_FILE:-}" ]]; then
         _df_log_dir="${XDG_STATE_HOME:-$HOME/.local/state}/dotfiles/install"
     fi
     mkdir -p "$_df_log_dir"
-    DOTFILES_LOG_FILE="$_df_log_dir/$(date +%Y%m%d-%H%M%S)-$$.log"
+    find "$_df_log_dir" -maxdepth 1 -name '*.log' -mtime +90 -delete 2>/dev/null || true
+    DOTFILES_LOG_FILE="$_df_log_dir/$(date +%Y%m%d).log"
     unset _df_log_dir
 fi
 export DOTFILES_LOG_FILE
