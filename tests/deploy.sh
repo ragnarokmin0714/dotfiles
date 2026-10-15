@@ -106,6 +106,15 @@ n=$(changes "$out")
 check "changes nothing (${n} changes)" test "$n" = 0
 
 # --- 3. Host files and dropped files ---------------------------------------------------------
+# Other cron jobs on the host: never touched, and a duplicate schedule is named
+echo '0 3 * * * root /usr/local/bin/backup.sh' > "$S/etc/cron.d/other-app"
+printf '45 8 * * * root /usr/local/sbin/sys-maint.sh\n' > "$S/etc/crontab"
+out=$(deploy "$S" maint)
+check "another tool's cron file is left alone" grep -q backup.sh "$S/etc/cron.d/other-app"
+check "the same script scheduled elsewhere is named" grep -q 'also scheduled in: /etc/crontab' <<< "$out"
+check "...and that crontab is not edited" grep -q sys-maint.sh "$S/etc/crontab"
+check "a redeploy keeps exactly one dotfiles-maint" test "$(find "$S/etc/cron.d" -name "dotfiles*" | wc -l)" = 1
+
 echo ""
 echo "== host-owned and dropped files =="
 echo 'MY_SETTING=1' > "$A/.bash_local"
