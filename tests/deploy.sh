@@ -138,6 +138,19 @@ seed "$V"
 bash "$R/install.sh" --root "$V" -y shell >/dev/null 2>&1
 if bash "$R/install.sh" --root "$V" -y maint >/dev/null 2>&1; then bad "a cron file failing validation stops the deploy"; else ok "a cron file failing validation stops the deploy"; fi
 check "...and is never installed" test ! -e "$V/etc/cron.d/bad.name"
+# A checkout under umask 002 has 0664 files; as root, logrotate refuses to read a
+# group-writable config. The deploy must judge the file as it will be installed (0644).
+G="$TMP/umask002"
+mkdir -p "$G" && (cd "$ROOT" && tar --exclude=.git -cf - .) | (cd "$G" && tar -xf -)
+chmod 0664 "$G/configs/logrotate.d/dotfiles"
+GS="$TMP/umask002-host"
+seed "$GS"
+if bash "$G/install.sh" --root "$GS" -y shell maint >/dev/null 2>&1; then
+    ok "a group-writable logrotate file in the checkout still deploys"
+else
+    bad "a group-writable logrotate file in the checkout still deploys"
+fi
+check "...installed 0644" test "$(mode "$GS/etc/logrotate.d/dotfiles")" = 644
 if bash "$ROOT/install.sh" --root "$TMP/x" nosuchmodule >/dev/null 2>&1; then bad "an unknown module is refused"; else ok "an unknown module is refused"; fi
 
 # --- 5. Every module's plan, both families ---------------------------------------------------

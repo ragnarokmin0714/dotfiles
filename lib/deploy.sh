@@ -361,10 +361,16 @@ df_check_bash() { bash -n "$1"; }
 #              throwaway state file. Skipped with a warning where logrotate is absent.
 df_check_logrotate() {
     command -v logrotate &>/dev/null || { log_warn "logrotate not installed -- ${1##*/} not checked"; return 0; }
-    local state out rc=0
+    # Check a 0644 copy, as it will be installed: run as root, logrotate refuses a
+    # config that is group-writable (a checkout under umask 002 is 0664) or not
+    # root-owned -- true of the repo file, never of the deployed one.
+    local state copy out rc=0
     state=$(mktemp)
-    out=$(logrotate -d -s "$state" "$1" 2>&1) || rc=$?
-    rm -f "$state"
+    copy=$(mktemp)
+    cp "$1" "$copy"
+    chmod 0644 "$copy"
+    out=$(logrotate -d -s "$state" "$copy" 2>&1) || rc=$?
+    rm -f "$state" "$copy"
     if (( rc )) || grep -qi '^error:' <<< "$out"; then
         printf '%s\n' "$out" | grep -i 'error' >&2
         return 1
