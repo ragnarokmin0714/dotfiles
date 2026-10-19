@@ -86,7 +86,7 @@ ask first (`-y` answers yes), and `-n` previews. `<command> -h` prints usage.
 |---|---|
 | `.bash_env` | platform globals (`OS_FAMILY`, `PKG_MGR`, `SUDO`, paths, `GIT_*`, `SYS_TOOLKIT`), `log_ok/err/warn/info/step/head/banner`, `path_add` |
 | `.bash_ui` | `radioselect`, `multiselect`, `confirm`, `ask`, `ui_tty` — every question goes through these |
-| `.bash_functions` | `dotfiles`, `sys_update` (`sup`), `sys_maintain` (`sys-maint`), `ntp-sync/-status/-fix`, `tz`, `find_path` (`fp`), `free_mem` (`fm`), `run_project` (`run-prj`), `stop_dev`, `rs`, `lh*`, `svc-*` |
+| `.bash_functions` | `dotfiles`, `sys_update` (`sup`), `sys_maintain` (`sys-maint`), `os_upgrade` (`os-upgrade`), `ntp-sync/-status/-fix`, `tz`, `find_path` (`fp`), `free_mem` (`fm`), `run_project` (`run-prj`), `stop_dev`, `rs`, `lh*`, `svc-*` |
 | `.bash_pkg` | `pkg_installed` (`pi`), `pkg_ensure` (`pe`), `pkg_remove` (`prm`), `pkg_install`, `pkg_enable_epel`, `sys_toolkit` (`toolkit`), `pkg_unused` (`pun`), `ensure_shfmt` |
 | `.bash_disk` | `disk_status` (`ds`), `disk_usage_top` (`dut`), `clean_up_disk` (`cud`), `clean_home_caches` (`chc`), `disk_grow` (`dg`) |
 | `.bash_git` | `gfm`, `gswp`, `gcr`, `gpcb`, `gcmb`, `gds`, `grd`, `gfl`, `amend`, `gpm`, `safe-push` |

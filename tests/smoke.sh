@@ -79,9 +79,9 @@ run "gds without indices fails with usage" - 'cd "'"$ROOT"'"; ! git_drop_stashes
 
 echo ""
 echo "== commands =="
-run "every public command has its alias" - 'for a in pi pe prm toolkit sup cud chc dut ds dg gfm gpcb gswp gcr gds gcmb grd gfl amend rs fp fm ngs nvm-i nvm-up; do alias "$a" >/dev/null; done'
-run "-h prints usage and succeeds" - 'for f in sys_update clean_up_disk clean_home_caches sys_toolkit pkg_install run_project stop_dev tz git_clean_merged git_drop_stashes; do $f -h | grep -q usage; done'
-run "unknown options are refused" - '! sys_update --bogus 2>/dev/null && ! clean_up_disk --bogus 2>/dev/null'
+run "every public command has its alias" - 'for a in pi pe prm toolkit sup os-upgrade cud chc dut ds dg gfm gpcb gswp gcr gds gcmb grd gfl amend rs fp fm ngs nvm-i nvm-up; do alias "$a" >/dev/null; done'
+run "-h prints usage and succeeds" - 'for f in sys_update os_upgrade clean_up_disk clean_home_caches sys_toolkit pkg_install run_project stop_dev tz git_clean_merged git_drop_stashes; do $f -h | grep -q usage; done'
+run "unknown options are refused" - '! sys_update --bogus 2>/dev/null && ! clean_up_disk --bogus 2>/dev/null && ! os_upgrade --bogus 2>/dev/null'
 run "sys_update -n prints, runs nothing" - 'sys_update -n | grep -q "upgrade"'
 run "clean_home_caches -n deletes nothing" - 'clean_home_caches -n >/dev/null'
 run "log helpers write the DOTFILES_LOG_FILE sink" - 'f=$(mktemp); DOTFILES_LOG_FILE=$f log_ok probe >/dev/null; grep -q "\[OK\] probe" "$f"; rm -f "$f"'
@@ -89,6 +89,29 @@ run "prompt hook is added once and keeps PROMPT_COMMAND" - 'PROMPT_COMMAND=title
 run "build_ps1 sets a prompt" - 'build_ps1; [[ $PS1 == *"\\W"* ]]'
 # Minimal RHEL-family images have no `hostname`; neither may break the prompt
 run "the prompt survives without ip and hostname" - 'ip() { return 1; }; hostname() { return 127; }; build_ps1; [[ -z "$(get_ip)" ]]'
+
+echo ""
+echo "== release upgrades (dry runs only) =="
+UBUNTU="OS_FAMILY=debian OS_ID=ubuntu OS_VERSION=22.04"
+ROCKY="OS_FAMILY=rhel OS_ID=rocky OS_VERSION=9.6"
+run "with no action and no terminal it fails with usage" - \
+    'out=$(os_upgrade 2>&1) && exit 1; grep -q usage <<< "$out"'
+run "ubuntu: run = update, backup, then do-release-upgrade" "$UBUNTU" \
+    'out=$(os_upgrade -n run 2>&1)
+     grep -q "apt-get upgrade" <<< "$out" && grep -q "etc.tar.gz" <<< "$out" &&
+     grep -q "apt-mark showmanual" <<< "$out" && grep -q "would run: .*do-release-upgrade$" <<< "$out"'
+run "ubuntu: -y makes the upgrade non-interactive" "$UBUNTU" \
+    'os_upgrade -n -y run 2>&1 | grep -q "do-release-upgrade -f DistUpgradeViewNonInteractive"'
+run "rocky: run refuses before touching anything" "$ROCKY" \
+    'out=$(os_upgrade -n run 2>&1) && exit 1
+     grep -q "No in-place upgrade for rocky" <<< "$out" && ! grep -q "would run" <<< "$out"'
+run "rocky: backup saves what a reinstall needs" "$ROCKY" \
+    'out=$(os_upgrade -n backup); grep -q "repoquery --userinstalled" <<< "$out" && grep -q "etc.tar.gz" <<< "$out"'
+run "ubuntu: cleanup ends in clean_up_disk" "$UBUNTU" 'os_upgrade -n cleanup 2>&1 | grep -q "apt-get autoremove"'
+run "rocky: cleanup ends in clean_up_disk" "$ROCKY" 'os_upgrade -n cleanup 2>&1 | grep -q "dnf autoremove"'
+run "a distro is added by its hooks alone" "OS_FAMILY=debian OS_ID=testos OS_VERSION=1" \
+    '_os_upgrade_testos_run() { echo HOOKED; }
+     os_upgrade -n run 2>&1 | grep -q HOOKED && ! OS_ID=debian os_upgrade -n run >/dev/null 2>&1'
 
 echo ""
 echo "Assertions: ${pass} passed, ${fail} failed"

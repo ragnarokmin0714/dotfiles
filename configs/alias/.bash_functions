@@ -397,6 +397,291 @@ sys_maintain() {
 alias sys-maint='sys_maintain'
 
 # =========================
+# --- Release upgrades ---
+# =========================
+# os_upgrade is generic; what differs per distro lives in hooks named
+#   _os_upgrade_<OS_ID>_<phase>       e.g. _os_upgrade_ubuntu_run
+#   _os_upgrade_<OS_FAMILY>_<phase>   the fallback for a whole family
+# with phases check (notes and blockers), run (the upgrade itself) and cleanup
+# (after the reboot). A distro without a run hook has no in-place upgrade: os_upgrade
+# refuses, and `os_upgrade backup` keeps what a reinstall needs. Adding a distro is
+# adding its hooks here; os_upgrade itself does not change. Hooks see the caller's
+# `dry` and `yes` and run root commands through _osu_do, so -n stays truthful.
+
+# @name _osu_do
+# @description Internal: run one command as root, or under os_upgrade -n only print it.
+_osu_do() {
+    if (( ${dry:-0} )); then
+        printf '  would run: %s\n' "${SUDO:+$SUDO }$*"
+        return 0
+    fi
+    log_step "Running: $*"
+    $SUDO "$@"
+}
+
+# @name _osu_hook
+# @description Internal: echo the hook for a phase -- the distro's own, else its
+#              family's. Fails when there is none.
+# @param $1 string  Phase: check | run | cleanup
+_osu_hook() {
+    local f
+    for f in "_os_upgrade_${OS_ID//[^a-zA-Z0-9_]/_}_$1" "_os_upgrade_${OS_FAMILY}_$1"; do
+        declare -F "$f" >/dev/null && { echo "$f"; return 0; }
+    done
+    return 1
+}
+
+# @name _osu_list
+# @description Internal: print a heading and the lines from stdin, if there are any.
+# @param $1 string  Heading, for log_warn
+_osu_list() {
+    local -a lines
+    mapfile -t lines
+    (( ${#lines[@]} )) || return 0
+    log_warn "$1"
+    printf '  %s\n' "${lines[@]}"
+}
+
+# @name _osu_reboot_pending
+# @description Internal: succeed when the running kernel or libraries are older than
+#              the installed ones, i.e. a reboot is due.
+_osu_reboot_pending() {
+    case "$PKG_MGR" in
+        apt) [[ -e /var/run/reboot-required ]] ;;
+        # needs-restarting (dnf-utils) exits 1 when a reboot is needed.
+        dnf) command -v needs-restarting &>/dev/null && ! needs-restarting -r &>/dev/null ;;
+        *)   return 1 ;;
+    esac
+}
+
+# @name _osu_check
+# @description Internal: what would stop a release upgrade, then the distro's notes.
+# @returns 0 nothing in the way; 1 something to fix first
+_osu_check() {
+    local rc=0 free_gb hook
+    log_head "Release upgrade: ${OS_ID} ${OS_VERSION}"
+    if _osu_reboot_pending; then
+        log_err "A reboot is pending -- reboot first, so the upgrade starts from the running system"
+        rc=1
+    fi
+    free_gb=$(df -BG --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')
+    if (( ${free_gb:-0} < OS_UPGRADE_MIN_FREE_GB )); then
+        log_err "Only ${free_gb:-?} GB free on / (want ${OS_UPGRADE_MIN_FREE_GB}) -- clean_up_disk or disk_grow first"
+        rc=1
+    else
+        log_ok "${free_gb} GB free on /"
+    fi
+    if [[ -n "${SSH_CONNECTION:-}" && -z "${TMUX:-}${STY:-}" ]]; then
+        log_warn "Over SSH without tmux/screen: a dropped connection can stop the upgrade half way"
+    fi
+    if hook=$(_osu_hook check); then
+        "$hook" || rc=1
+    fi
+    _osu_hook run >/dev/null || log_warn "No in-place upgrade for ${OS_ID}: reinstall, keeping 'os_upgrade backup'"
+    return "$rc"
+}
+
+# @name _osu_backup
+# @description Internal: save /etc and the hand-installed package list under
+#              OS_UPGRADE_BACKUP_DIR/<id>-<version>-<time>, root-only.
+_osu_backup() {
+    local dest
+    dest="${OS_UPGRADE_BACKUP_DIR}/${OS_ID}-${OS_VERSION}-$(date +%Y%m%d-%H%M%S)"
+    local -a list
+    case "$PKG_MGR" in
+        apt) list=(apt-mark showmanual) ;;
+        dnf) list=(dnf -q repoquery --userinstalled --qf '%{name}\n') ;;
+        *)   log_err "No supported package manager (OS family: ${OS_FAMILY})"; return 1 ;;
+    esac
+    log_step "Backing up to ${dest}"
+    _osu_do mkdir -p -m 700 "$dest" || return 1
+    if (( dry )); then
+        printf '  would run: %s > %s\n' "${list[*]}" "$dest/packages.txt"
+    else
+        "${list[@]}" | $SUDO tee "$dest/packages.txt" >/dev/null \
+            || { log_err "Could not write the package list"; return 1; }
+    fi
+    _osu_do tar -czf "$dest/etc.tar.gz" -C / etc || { log_err "Could not archive /etc"; return 1; }
+    (( dry )) && return 0
+    log_ok "Backup in ${dest}: etc.tar.gz, packages.txt"
+    log_info "/home, databases and service data are not in it -- copy them off this machine yourself"
+}
+
+# @name _osu_cleanup
+# @description Internal: after the upgrade and its reboot -- the distro's own checks,
+#              then clean_up_disk (autoremove, caches, old kernels).
+_osu_cleanup() {
+    if _osu_reboot_pending; then
+        (( dry )) || { log_err "Reboot into the new release first, then run cleanup"; return 1; }
+        log_warn "A reboot is pending (ignored for the dry run)"
+    fi
+    log_head "After the upgrade: ${OS_ID} ${OS_VERSION}"
+    local hook
+    if hook=$(_osu_hook cleanup); then
+        "$hook" || return 1
+    fi
+    local -a flags=()
+    (( dry )) && flags+=(-n)
+    (( yes )) && flags+=(-y)
+    clean_up_disk "${flags[@]}" || return 1
+    if [[ -d "$OS_UPGRADE_BACKUP_DIR" ]]; then
+        log_info "Pre-upgrade backups are in ${OS_UPGRADE_BACKUP_DIR} -- remove them once the new release has proven itself"
+    fi
+}
+
+# ── Ubuntu: LTS to the next LTS with do-release-upgrade ─────────────────────
+
+_os_upgrade_ubuntu_check() {
+    local prompt
+    prompt=$(sed -n 's/^Prompt=//p' /etc/update-manager/release-upgrades 2>/dev/null)
+    case "${prompt:-lts}" in
+        lts)   log_ok "Prompt=lts: goes to the next LTS (one at a time: 22.04 -> 24.04 -> 26.04)" ;;
+        never) log_err "Prompt=never in /etc/update-manager/release-upgrades: upgrades are switched off"; return 1 ;;
+        *)     log_warn "Prompt=${prompt}: goes to the next release, which may not be an LTS" ;;
+    esac
+    if (( dry )); then
+        log_info "Would ask Ubuntu for a new release: do-release-upgrade -c"
+    elif command -v do-release-upgrade &>/dev/null; then
+        do-release-upgrade -c || log_warn "No new release offered to this machine yet"
+    fi
+    return 0
+}
+
+_os_upgrade_ubuntu_run() {
+    local -a n=() cmd=(do-release-upgrade)
+    (( dry )) && n=(-n)
+    pkg_install "${n[@]}" update-manager-core || return 1
+    # Without -y it asks its own questions (config files, restarts); over SSH it opens
+    # a spare sshd on port 1022 and runs inside screen.
+    (( yes )) && cmd+=(-f DistUpgradeViewNonInteractive)
+    _osu_do "${cmd[@]}" || { log_err "do-release-upgrade failed -- see /var/log/dist-upgrade/"; return 1; }
+    (( dry )) || log_ok "Done. Reboot, then: os_upgrade cleanup"
+}
+
+_os_upgrade_ubuntu_cleanup() {
+    # The upgrade switches third-party sources off rather than guess whether they
+    # have a build for the new release.
+    grep -lsE 'disabled on upgrade|^Enabled: *no' /etc/apt/sources.list.d/* \
+        | _osu_list "Sources the upgrade switched off -- re-enable each once it supports the new release:"
+    if command -v apt &>/dev/null; then
+        # Often the packages of those very sources: listed, never removed for you.
+        apt list '?obsolete' 2>/dev/null | awk -F/ 'NF > 1 { print $1 }' \
+            | _osu_list "Installed, but in no enabled source -- review each, then apt purge <name>:"
+    fi
+    find /etc \( -name '*.dpkg-dist' -o -name '*.dpkg-old' -o -name '*.ucf-dist' \
+        -o -name '*.ucf-old' -o -name '*.distUpgrade' \) 2>/dev/null \
+        | _osu_list "Config files set aside by the upgrade -- merge or delete each:"
+    local -a leftover
+    mapfile -t leftover < <(dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 2>/dev/null | awk '$1 == "rc" { print $2 }')
+    (( ${#leftover[@]} )) || return 0
+    log_info "${#leftover[@]} removed package(s) left config files behind:"
+    printf '%s ' "${leftover[@]}" | fmt -w 96 | sed 's/^/  /'
+    if (( dry )) || confirm "Purge those config files?"; then
+        _osu_do env DEBIAN_FRONTEND=noninteractive apt-get purge -y "${leftover[@]}"
+    fi
+    return 0
+}
+
+# ── RHEL family: no run hook -- Rocky and Alma do not support it, RHEL uses leapp ──
+
+_os_upgrade_rhel_check() {
+    local next=$(( OS_MAJOR + 1 )) rc=0
+    if [[ "$(uname -m)" == x86_64 ]] && (( next >= 10 )); then
+        if /lib64/ld-linux-x86-64.so.2 --help 2>/dev/null | grep -q 'x86-64-v3 (supported'; then
+            log_ok "The CPU has x86-64-v3, which EL${next} needs"
+        else
+            log_err "No x86-64-v3 on this CPU (or VM CPU model): RHEL/Rocky ${next} will not run here; AlmaLinux ${next} has an x86-64-v2 build"
+            rc=1
+        fi
+    fi
+    if [[ "$OS_ID" == rhel ]]; then
+        log_info "Red Hat upgrades in place with leapp (dnf install leapp-upgrade; leapp preupgrade) -- not automated here"
+    fi
+    return "$rc"
+}
+
+_os_upgrade_rhel_cleanup() {
+    # After a leapp or ELevate upgrade, or a restore onto a fresh install.
+    local prev=$(( OS_MAJOR - 1 ))
+    rpm -qa 2>/dev/null | grep -E "\.el${prev}([._]|$)" | sort \
+        | _osu_list "Packages still from EL${prev} -- update or remove each:"
+    find /etc \( -name '*.rpmnew' -o -name '*.rpmsave' \) 2>/dev/null \
+        | _osu_list "Config files set aside by rpm -- merge or delete each:"
+    return 0
+}
+
+# @name os_upgrade
+# @description Upgrade to the next major release of the distro, in steps:
+#                check    what would stop it (pending reboot, disk space, distro
+#                         notes such as Ubuntu's Prompt= or EL10's CPU level)
+#                backup   /etc and the hand-installed package list, root-only, in
+#                         OS_UPGRADE_BACKUP_DIR
+#                run      check, sys_update, backup, then the distro's upgrade
+#                cleanup  after the reboot: what the upgrade set aside or switched
+#                         off, leftover config files, then clean_up_disk
+#              Ubuntu upgrades in place (do-release-upgrade, LTS to LTS). Rocky and
+#              Alma have no supported in-place path: run refuses, and backup is
+#              what the reinstall needs. Other distros: add hooks (see above).
+# @param -n | --dry-run  flag    Show what would run, change nothing
+# @param -y | --yes      flag    Answer yes; on Ubuntu, a non-interactive upgrade
+# @param $1              string  check | backup | run | cleanup (default: a menu)
+# @example os-upgrade check
+# @example os-upgrade -n run      # the whole plan, nothing changed
+# @example os-upgrade cleanup     # after the reboot
+os_upgrade() {
+    local dry=0 yes=0 action="" usage="usage: os_upgrade [-n] [-y] check|backup|run|cleanup"
+    while (( $# )); do
+        case "$1" in
+            -n | --dry-run) dry=1 ;;
+            -y | --yes)     yes=1 ;;
+            -h | --help)    echo "$usage"; return 0 ;;
+            check | backup | run | cleanup) action="$1" ;;
+            *) log_err "Unknown argument: $1 -- ${usage}"; return 1 ;;
+        esac
+        shift
+    done
+    if [[ -z "$action" ]]; then
+        ui_tty || { log_err "$usage"; return 1; }
+        local -a actions=(check backup run cleanup)
+        local pick
+        radioselect pick "Release upgrade (${OS_ID} ${OS_VERSION}):" -1 \
+            "check    what would stop an upgrade" \
+            "backup   save /etc and the package list" \
+            "run      upgrade to the next release" \
+            "cleanup  after the upgrade and its reboot" || return 1
+        action="${actions[$pick]}"
+    fi
+    local UI_ASSUME_YES="$UI_ASSUME_YES"
+    (( yes )) && UI_ASSUME_YES=1
+
+    case "$action" in
+        check)   _osu_check ;;
+        backup)  _osu_backup ;;
+        cleanup) _osu_cleanup ;;
+        run)
+            if ! _osu_check; then
+                (( dry )) || { log_err "Fix the above first"; return 1; }
+                log_warn "Continuing the dry run despite the above"
+            fi
+            local hook
+            hook=$(_osu_hook run) || {
+                log_err "No in-place upgrade for ${OS_ID} ${OS_VERSION} -- 'os_upgrade backup' keeps what a reinstall needs"
+                return 1
+            }
+            (( dry )) || confirm "Upgrade ${OS_ID} ${OS_VERSION} to the next release now?" \
+                || { log_step "Cancelled"; return 1; }
+            local -a flags=()
+            (( dry )) && flags+=(-n)
+            (( yes )) && flags+=(-y)
+            sys_update "${flags[@]}" || return 1
+            _osu_backup || return 1
+            "$hook"
+            ;;
+    esac
+}
+alias os-upgrade='os_upgrade'
+
+# =========================
 # --- Project dev servers ---
 # =========================
 
