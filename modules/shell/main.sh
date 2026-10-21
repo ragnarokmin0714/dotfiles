@@ -38,7 +38,7 @@ remove_legacy_loader() {
         $0 == "[ -f " dir "/.bash_aliases ] && source " dir "/.bash_aliases" { next }
         { print }
     ' "$target" > "$new"
-    if cmp -s "$new" "$target"; then
+    if df_same "$new" "$target"; then
         rm -f "$new"
         return 0
     fi

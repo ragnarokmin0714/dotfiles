@@ -105,6 +105,19 @@ out=$(deploy "$S" shell maint sudo claude)
 n=$(changes "$out")
 check "changes nothing (${n} changes)" test "$n" = 0
 
+# Minimal RHEL-family images (UBI, Rocky's container) have no cmp (diffutils). Without
+# it every redeploy used to rewrite and back up every file, so CI failed there alone.
+NOCMP="$TMP/nocmp-bin"
+mkdir -p "$NOCMP"
+for d in /usr/local/bin /usr/bin /bin; do
+    for f in "$d"/*; do
+        [[ -x "$f" && "${f##*/}" != cmp && ! -e "$NOCMP/${f##*/}" ]] && ln -s "$f" "$NOCMP/${f##*/}"
+    done
+done
+out=$(PATH="$NOCMP:/usr/local/sbin:/usr/sbin:/sbin" deploy "$S" shell maint sudo claude)
+n=$(changes "$out")
+check "...and without cmp too (${n} changes)" test "$n" = 0
+
 # --- 3. Host files and dropped files ---------------------------------------------------------
 # Other cron jobs on the host: never touched, and a duplicate schedule is named
 echo '0 3 * * * root /usr/local/bin/backup.sh' > "$S/etc/cron.d/other-app"

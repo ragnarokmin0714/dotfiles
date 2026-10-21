@@ -32,6 +32,23 @@ fi
 # @example target=$(df_path /etc/cron.d/dotfiles-maint)
 df_path() { printf '%s%s' "$DF_ROOT" "$1"; }
 
+# @name df_same
+# @description True when both files exist and hold the same bytes. cmp comes with
+#              diffutils, which minimal RHEL-family images (UBI, Rocky's container)
+#              leave out -- and without it every redeploy rewrote and backed up every
+#              file -- so without cmp it compares checksums (coreutils).
+# @param $1  string  A file
+# @param $2  string  Another file
+# @example df_same "$new" "$target" && log_ok "unchanged"
+df_same() {
+    [[ -f "$1" && -f "$2" ]] || return 1
+    if type -P cmp >/dev/null; then
+        cmp -s "$1" "$2"
+        return
+    fi
+    [[ "$(sha256sum < "$1")" == "$(sha256sum < "$2")" ]]
+}
+
 # @name df_backup
 # @description Copy an existing real path (already DF_ROOT-prefixed) into DF_BACKUP_DIR.
 df_backup() {
@@ -76,7 +93,7 @@ df_install() {
 
     local target
     target=$(df_path "$dst")
-    if [[ -f "$target" ]] && cmp -s "$src" "$target" && [[ "$(stat -c %a "$target")" == "${mode#0}" ]]; then
+    if df_same "$src" "$target" && [[ "$(stat -c %a "$target")" == "${mode#0}" ]]; then
         log_ok "unchanged  ${dst}"
         return 0
     fi
@@ -201,7 +218,7 @@ _df_manifest_sync() {
     local tmp
     tmp=$(mktemp)
     printf '%s\n' "$@" | sort > "$tmp"
-    if ! cmp -s "$tmp" "$mf" 2>/dev/null; then
+    if ! df_same "$tmp" "$mf"; then
         install -D -m 0644 "$tmp" "$mf"
         _df_chown "$mf" "$owner"
     fi
@@ -256,7 +273,7 @@ df_block() {
         printf '%s\n%s\n%s\n' "$begin" "$content" "$end" >> "$new"
     fi
 
-    if [[ -f "$target" ]] && cmp -s "$new" "$target"; then
+    if df_same "$new" "$target"; then
         rm -f "$new"
         log_ok "unchanged  ${file} (dotfiles:${name})"
         return 0
