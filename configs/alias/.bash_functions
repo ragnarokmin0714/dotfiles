@@ -344,14 +344,17 @@ alias fm='free_mem'
 #              conffile prompt would hang it).
 # @param -y | --yes      flag  Fully non-interactive
 # @param -n | --dry-run  flag  Print the commands, run nothing
+# @param -f | --full     flag  apt: full-upgrade, so updates that need a new package
+#                              are installed too instead of kept back
 # @example sup           # asks before upgrading
 # @example sup -y        # unattended (sys-maint.sh)
 sys_update() {
-    local yes=0 dry=0 usage="usage: sys_update [-y] [-n]"
+    local yes=0 dry=0 full=0 usage="usage: sys_update [-y] [-n] [-f]"
     while (( $# )); do
         case "$1" in
             -y | --yes)     yes=1 ;;
             -n | --dry-run) dry=1 ;;
+            -f | --full)    full=1 ;;
             -h | --help)    echo "$usage"; return 0 ;;
             *) log_err "Unknown option: $1 -- ${usage}"; return 1 ;;
         esac
@@ -361,10 +364,12 @@ sys_update() {
     local -a refresh upgrade
     case "$PKG_MGR" in
         apt)
+            local verb=upgrade
+            (( full )) && verb="full-upgrade"
             refresh=(apt-get update)
-            upgrade=(apt-get upgrade)
+            upgrade=(apt-get "$verb")
             (( yes )) && upgrade=(env DEBIAN_FRONTEND=noninteractive apt-get -y
-                -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade)
+                -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$verb")
             ;;
         dnf)
             refresh=(dnf makecache)
@@ -554,7 +559,7 @@ _os_upgrade_ubuntu_run() {
     # Without -y it asks its own questions (config files, restarts); over SSH it opens
     # a spare sshd on port 1022 and runs inside screen.
     (( yes )) && cmd+=(-f DistUpgradeViewNonInteractive)
-    _osu_do "${cmd[@]}" || { log_err "do-release-upgrade failed -- see /var/log/dist-upgrade/"; return 1; }
+    _osu_do "${cmd[@]}" || { log_err "do-release-upgrade failed -- see its message above, and /var/log/dist-upgrade/ if it got that far"; return 1; }
     (( dry )) || log_ok "Done. Reboot, then: os_upgrade cleanup"
 }
 
@@ -673,7 +678,8 @@ os_upgrade() {
             local -a flags=()
             (( dry )) && flags+=(-n)
             (( yes )) && flags+=(-y)
-            sys_update "${flags[@]}" || return 1
+            # --full: do-release-upgrade refuses while any update is kept back.
+            sys_update --full "${flags[@]}" || return 1
             _osu_backup || return 1
             "$hook"
             ;;

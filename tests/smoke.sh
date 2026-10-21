@@ -96,9 +96,9 @@ UBUNTU="OS_FAMILY=debian OS_ID=ubuntu OS_VERSION=22.04"
 ROCKY="OS_FAMILY=rhel OS_ID=rocky OS_VERSION=9.6"
 run "with no action and no terminal it fails with usage" - \
     'out=$(os_upgrade 2>&1) && exit 1; grep -q usage <<< "$out"'
-run "ubuntu: run = update, backup, then do-release-upgrade" "$UBUNTU" \
+run "ubuntu: run = full update (do-release-upgrade refuses kept-back updates), backup, upgrade" "$UBUNTU" \
     'out=$(os_upgrade -n run 2>&1)
-     grep -q "apt-get upgrade" <<< "$out" && grep -q "etc.tar.gz" <<< "$out" &&
+     grep -q "apt-get full-upgrade" <<< "$out" && grep -q "etc.tar.gz" <<< "$out" &&
      grep -q "apt-mark showmanual" <<< "$out" && grep -q "would run: .*do-release-upgrade$" <<< "$out"'
 run "ubuntu: -y makes the upgrade non-interactive" "$UBUNTU" \
     'os_upgrade -n -y run 2>&1 | grep -q "do-release-upgrade -f DistUpgradeViewNonInteractive"'
@@ -107,8 +107,8 @@ run "rocky: run refuses before touching anything" "$ROCKY" \
      grep -q "No in-place upgrade for rocky" <<< "$out" && ! grep -q "would run" <<< "$out"'
 run "rocky: backup saves what a reinstall needs" "$ROCKY" \
     'out=$(os_upgrade -n backup); grep -q "repoquery --userinstalled" <<< "$out" && grep -q "etc.tar.gz" <<< "$out"'
-run "ubuntu: cleanup ends in clean_up_disk" "$UBUNTU" 'os_upgrade -n cleanup 2>&1 | grep -q "apt-get autoremove"'
-run "rocky: cleanup ends in clean_up_disk" "$ROCKY" 'os_upgrade -n cleanup 2>&1 | grep -q "dnf autoremove"'
+run "ubuntu: cleanup ends in clean_up_disk" "$UBUNTU" 'out=$(os_upgrade -n cleanup 2>&1); grep -q "apt-get autoremove" <<< "$out"'
+run "rocky: cleanup ends in clean_up_disk" "$ROCKY" 'out=$(os_upgrade -n cleanup 2>&1); grep -q "dnf autoremove" <<< "$out"'
 run "a distro is added by its hooks alone" "OS_FAMILY=debian OS_ID=testos OS_VERSION=1" \
     '_os_upgrade_testos_run() { echo HOOKED; }
      os_upgrade -n run 2>&1 | grep -q HOOKED && ! OS_ID=debian os_upgrade -n run >/dev/null 2>&1'

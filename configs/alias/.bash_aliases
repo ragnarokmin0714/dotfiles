@@ -49,6 +49,7 @@ if [[ $- == *i* ]]; then prompt_enable; fi
 #   -d, --dir       directory, takes a value                 (run_project)
 #   -l, --list      list only                                (tz)
 #   -o, --optional  include the optional set                 (sys_toolkit)
+#   -f, --full      upgrade fully, new packages included     (sys_update)
 # Older exceptions, kept so habits still work: pkg_unused -s is --min-size,
 # sys_toolkit -m and nvm_upgrade -m open a menu, git_amend -m is --message.
 # Don't add new ones.
