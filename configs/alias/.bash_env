@@ -183,6 +183,10 @@ OS_UPGRADE_BACKUP_DIR="${OS_UPGRADE_BACKUP_DIR:-/var/backups/os-upgrade}"
 #                                starts: a release upgrade downloads and unpacks
 #                                most of the system at once.
 OS_UPGRADE_MIN_FREE_GB="${OS_UPGRADE_MIN_FREE_GB:-5}"
+# @const OS_UPGRADE_UBUNTU_LOG   do-release-upgrade's log: its "Obsolete:" line names
+#                                the old release's packages, which os_upgrade cleanup
+#                                may purge (anything else in no source is only listed).
+OS_UPGRADE_UBUNTU_LOG="${OS_UPGRADE_UBUNTU_LOG:-/var/log/dist-upgrade/main.log}"
 
 # @name path_add
 # @description Put a directory on PATH once, if it exists. Prepends by default;

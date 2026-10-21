@@ -108,6 +108,26 @@ run "rocky: run refuses before touching anything" "$ROCKY" \
 run "rocky: backup saves what a reinstall needs" "$ROCKY" \
     'out=$(os_upgrade -n backup); grep -q "repoquery --userinstalled" <<< "$out" && grep -q "etc.tar.gz" <<< "$out"'
 run "ubuntu: cleanup ends in clean_up_disk" "$UBUNTU" 'out=$(os_upgrade -n cleanup 2>&1); grep -q "apt-get autoremove" <<< "$out"'
+# apt stubs: oldlib/oldmeta are the old release's (logged obsolete), mydeb is a local
+# .deb (obsolete, not logged), user-dev still depends on oldlib. Purging the old
+# release must never take user-dev or mydeb along.
+APT_STUBS='log=$(mktemp); echo "x DEBUG Obsolete: oldlib oldmeta" > "$log"; OS_UPGRADE_UBUNTU_LOG=$log
+     apt() { printf "%s\n" Listing... "oldlib/now 1 arm64 [installed,local]" "oldmeta/now 1 arm64 [installed,local]" "mydeb/now 1 arm64 [installed,local]"; }'
+run "ubuntu: cleanup purges the old release, keeping what depends on it via its replacement" "$UBUNTU" \
+    "$APT_STUBS"'
+     apt-get() { case " $* " in
+         *" user-dev+ "*) printf "%s\n" "Purg oldlib [1]" "Purg oldmeta [1]" "Inst newlib (2 x)" ;;
+         *" -s "*)        printf "%s\n" "Purg oldlib [1]" "Purg oldmeta [1]" "Purg user-dev [1]" ;;
+     esac; }
+     out=$(os_upgrade -n cleanup 2>&1)
+     grep -q "would run: .*apt-get purge -y oldlib oldmeta user-dev+$" <<< "$out" &&
+     grep -q "install  newlib" <<< "$out" && ! grep -q "remove   user-dev" <<< "$out" &&
+     grep -A1 "not from the old release" <<< "$out" | grep -q mydeb'
+run "ubuntu: cleanup purges nothing when apt cannot keep the dependents" "$UBUNTU" \
+    "$APT_STUBS"'
+     apt-get() { printf "%s\n" "Purg oldlib [1]" "Purg oldmeta [1]" "Purg user-dev [1]"; }
+     out=$(os_upgrade -n cleanup 2>&1)
+     ! grep -q "apt-get purge -y oldlib" <<< "$out" && grep -q "apt finds no way to keep" <<< "$out"'
 run "rocky: cleanup ends in clean_up_disk" "$ROCKY" 'out=$(os_upgrade -n cleanup 2>&1); grep -q "dnf autoremove" <<< "$out"'
 run "a distro is added by its hooks alone" "OS_FAMILY=debian OS_ID=testos OS_VERSION=1" \
     '_os_upgrade_testos_run() { echo HOOKED; }

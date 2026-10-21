@@ -563,15 +563,73 @@ _os_upgrade_ubuntu_run() {
     (( dry )) || log_ok "Done. Reboot, then: os_upgrade cleanup"
 }
 
+# @name _osu_ubuntu_obsolete
+# @description Internal: purge what the old release left installed -- packages in no
+#              enabled source that do-release-upgrade itself logged as obsolete. The
+#              rest of ?obsolete (a local .deb, a source the upgrade switched off) is
+#              only listed. A package that still depends on an old one is kept: apt is
+#              asked for a plan that keeps it ("name+"), which pulls in the new
+#              release's replacement (libsysprof-4-dev -> libsysprof-capture-4-dev).
+#              Without such a plan nothing is purged.
+# @param $1 int  1 when the upgrade switched sources off: their packages are among
+#                the obsolete ones, so everything is only listed
+_osu_ubuntu_obsolete() {
+    local switched_off="$1" logged p plan
+    local -a obsolete old=() other=() extra=() keep=()
+    mapfile -t obsolete < <(apt list '?obsolete' 2>/dev/null | awk -F/ 'NF > 1 { print $1 }')
+    (( ${#obsolete[@]} )) || return 0
+    if (( switched_off )); then
+        printf '%s\n' "${obsolete[@]}" \
+            | _osu_list "Installed, but in no enabled source -- re-enable the sources above first, then review each and apt purge <name>:"
+        return 0
+    fi
+    # One "Obsolete:" line per upgrade run; the last is the upgrade just done.
+    logged=$(grep -hs ' Obsolete: ' "$OS_UPGRADE_UBUNTU_LOG" | tail -1 | sed 's/.* Obsolete: //')
+    for p in "${obsolete[@]}"; do
+        if [[ " $logged " == *" $p "* ]]; then old+=("$p"); else other+=("$p"); fi
+    done
+    if (( ${#other[@]} )); then
+        printf '%s\n' "${other[@]}" \
+            | _osu_list "Installed, but in no enabled source and not from the old release -- review each, then apt purge <name>:"
+    fi
+    (( ${#old[@]} )) || return 0
+
+    # Simulate, then ask whatever else the purge would take along to stay.
+    plan=$(LC_ALL=C apt-get -s purge "${old[@]}" 2>&1)
+    mapfile -t extra < <(awk '$1 == "Purg" || $1 == "Remv" { print $2 }' <<< "$plan" \
+        | grep -vxF -f <(printf '%s\n' "${old[@]}"))
+    if (( ${#extra[@]} )); then
+        keep=("${extra[@]/%/+}")
+        if plan=$(LC_ALL=C apt-get -s purge "${old[@]}" "${keep[@]}" 2>&1); then
+            mapfile -t extra < <(awk '$1 == "Purg" || $1 == "Remv" { print $2 }' <<< "$plan" \
+                | grep -vxF -f <(printf '%s\n' "${old[@]}"))
+        fi
+        if (( ${#extra[@]} )) || grep -q '^E:' <<< "$plan"; then
+            log_warn "Purging the old release's packages would also remove packages still in use, and apt finds no way to keep them:"
+            printf '  %s\n' "${keep[@]%+}"
+            printf '%s\n' "${old[@]}" \
+                | _osu_list "Left over from the old release -- review each, then apt purge <name>:"
+            return 0
+        fi
+    fi
+    log_info "${#old[@]} package(s) left over from the old release -- simulated purge:"
+    awk '$1 == "Purg" || $1 == "Remv" { print "  remove   " $2 }
+         $1 == "Inst" { print "  install  " $2 }' <<< "$plan"
+    if (( dry )) || confirm "Purge them?"; then
+        _osu_do env DEBIAN_FRONTEND=noninteractive apt-get purge -y "${old[@]}" "${keep[@]}"
+    fi
+    return 0
+}
+
 _os_upgrade_ubuntu_cleanup() {
     # The upgrade switches third-party sources off rather than guess whether they
     # have a build for the new release.
+    local switched_off=0
     grep -lsE 'disabled on upgrade|^Enabled: *no' /etc/apt/sources.list.d/* \
         | _osu_list "Sources the upgrade switched off -- re-enable each once it supports the new release:"
+    grep -qsE 'disabled on upgrade|^Enabled: *no' /etc/apt/sources.list.d/* && switched_off=1
     if command -v apt &>/dev/null; then
-        # Often the packages of those very sources: listed, never removed for you.
-        apt list '?obsolete' 2>/dev/null | awk -F/ 'NF > 1 { print $1 }' \
-            | _osu_list "Installed, but in no enabled source -- review each, then apt purge <name>:"
+        _osu_ubuntu_obsolete "$switched_off"
     fi
     find /etc \( -name '*.dpkg-dist' -o -name '*.dpkg-old' -o -name '*.ucf-dist' \
         -o -name '*.ucf-old' -o -name '*.distUpgrade' \) 2>/dev/null \
@@ -623,7 +681,8 @@ _os_upgrade_rhel_cleanup() {
 #                         OS_UPGRADE_BACKUP_DIR
 #                run      check, sys_update, backup, then the distro's upgrade
 #                cleanup  after the reboot: what the upgrade set aside or switched
-#                         off, leftover config files, then clean_up_disk
+#                         off, the old release's packages (Ubuntu), leftover config
+#                         files, then clean_up_disk
 #              Ubuntu upgrades in place (do-release-upgrade, LTS to LTS). Rocky and
 #              Alma have no supported in-place path: run refuses, and backup is
 #              what the reinstall needs. Other distros: add hooks (see above).
