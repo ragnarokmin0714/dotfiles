@@ -67,7 +67,7 @@ install.sh [options] [module...]     no module: pick from a menu
 | `shell` | the library → `/etc/profile.d/.alias`; a managed hook block in the system bashrc; git defaults in `/etc/gitconfig` | ✔ |
 | `maint` | `/usr/local/sbin/{sys-maint,ntp-sync}.sh`, `/etc/cron.d/dotfiles-maint`, `/etc/logrotate.d/dotfiles`, logs in `/var/log/dotfiles` | ✔ |
 | `claude` | Claude Code config → `~/.claude` of the deploy user (only what dotfiles put there is ever removed) | ✔ |
-| `docker` | Docker CE + compose/buildx from Docker's repo; deploy user joins `docker` | ✔ |
+| `docker` | Docker CE + compose/buildx from Docker's repo, **rootless**: the system daemon stays off and the deploy user runs their own (never group `docker`, which is root-equivalent) | ✔ |
 | `node` | nvm + Node (LTS) + pnpm for the deploy user | ✔ |
 | `python` | python3, pip, venv | ✔ |
 | `go` | Go from go.dev, SHA-256 verified | ✔ |

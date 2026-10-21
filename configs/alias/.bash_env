@@ -141,6 +141,8 @@ PKG_NAME_MAP+=(
     [dnf:shellcheck]=ShellCheck
     [dnf:python3-venv]=""
     [dnf:ufw]=""
+    [dnf:uidmap]=shadow-utils
+    [dnf:dbus-user-session]=""
     [apt:firewalld]=""
 )
 
