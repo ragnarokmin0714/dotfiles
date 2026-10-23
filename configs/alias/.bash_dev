@@ -106,6 +106,8 @@ run_headless() {
         [[ ${#cookie} -eq 32 ]] || { log_err "Could not make an access cookie"; exit 1; }
         # The server loads every cookie in the file whatever its display number; the
         # client looks one up by number, so the real entry is added once it is known.
+        # Creating the file first keeps xauth from warning that it does not exist.
+        : > "$auth"
         xauth -q -f "$auth" add :0 . "$cookie"
         xvfb[4]="$auth"
         "${xvfb[@]}" 3>"$dir/display" 2>"$dir/xvfb.log" &
