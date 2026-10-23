@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# @file .bash_dev
+# @brief Development and test tools: install them (sys_devtest), run GUI tests on a
+#        locked-down virtual display (run_headless), clippy for Windows (win_clippy).
+# =========================
+# --- Development & tests ---
+# =========================
+#
+# Opt-in tools for building and testing software on machines with no screen. The
+# packages come from SYS_DEVTEST (.bash_env), installed only on request.
+#
+# Xvfb is an X server, and X servers have a long CVE history: memory bugs in
+# protocol handling, triggered by a client that connects and sends crafted
+# requests. run_headless is the one way to start it here, and it keeps every
+# instance small and short-lived:
+#   - no TCP (-nolisten tcp); local connections need a one-time random cookie,
+#     kept in a private 0700 directory;
+#   - GLX, the 3D extension, is off -- GUI tests here draw in software;
+#   - it runs as you (never root) and only for as long as the command does.
+
+# @name sys_devtest
+# @description Install the development and test toolkit (SYS_DEVTEST, .bash_env) with
+#              the system package manager, without recommended extras.
+# @param -n | --dry-run  flag  Print what would be installed, change nothing
+# @example devtest         # install xvfb and xauth
+# @example devtest -n      # show what it would install
+sys_devtest() {
+    local dry=0 usage="usage: sys_devtest [-n]"
+    while (( $# )); do
+        case "$1" in
+            -n | --dry-run) dry=1 ;;
+            -h | --help)    echo "$usage"; return 0 ;;
+            *) log_err "Unknown option: $1 -- ${usage}"; return 1 ;;
+        esac
+        shift
+    done
+    [[ -n "$PKG_MGR" ]] || { log_err "No supported package manager (OS family: ${OS_FAMILY})"; return 1; }
+    local -a n=()
+    (( dry )) && n=(-n)
+    pkg_install "${n[@]}" "${SYS_DEVTEST[@]}"
+}
+alias devtest='sys_devtest'
+
+# @name run_headless
+# @description Run a command on a private virtual X display that exists only while
+#              the command runs (Xvfb, see the notes at the top of this file). The
+#              command gets DISPLAY and XAUTHORITY; nothing else can connect.
+#              With no command and a terminal, asks for one (split on spaces; pass
+#              arguments with spaces on the command line instead).
+# @param --screen       value  WxHxDepth (default HEADLESS_SCREEN, 1920x1080x24)
+# @param -n | --dry-run flag   Print the Xvfb command line, run nothing
+# @example headless cargo test -p chonkgene
+# @example headless --screen 1280x800x24 ./target/release/chonkgene
+# @example headless -n true     # show how Xvfb would be started
+run_headless() {
+    local screen="$HEADLESS_SCREEN" dry=0
+    local usage="usage: run_headless [--screen WxHxDepth] [-n] <command> [args...]"
+    while (( $# )); do
+        case "$1" in
+            --screen)
+                [[ -n "${2:-}" ]] || { log_err "--screen needs WxHxDepth -- ${usage}"; return 1; }
+                screen="$2"; shift ;;
+            -n | --dry-run) dry=1 ;;
+            -h | --help)    echo "$usage"; return 0 ;;
+            --) shift; break ;;
+            -*) log_err "Unknown option: $1 -- ${usage}"; return 1 ;;
+            *)  break ;;
+        esac
+        shift
+    done
+    [[ "$screen" =~ ^[0-9]+x[0-9]+x(8|16|24|32)$ ]] || { log_err "Bad --screen '${screen}' (want WxHxDepth) -- ${usage}"; return 1; }
+    local -a cmd=("$@")
+    if (( ! ${#cmd[@]} )); then
+        local typed=""
+        ui_tty && ask typed "Command to run on the virtual display"
+        [[ -n "$typed" ]] || { log_err "Nothing to run -- ${usage}"; return 1; }
+        read -r -a cmd <<< "$typed"
+    fi
+
+    # The lock-down lives here and nowhere else: -nolisten tcp, a cookie (-auth),
+    # GLX off. The tests in tests/smoke.sh fail if any of it goes missing.
+    local -a xvfb=(Xvfb -displayfd 3 -auth "<private dir>/Xauthority" -nolisten tcp
+                   -extension GLX -screen 0 "$screen")
+    if (( dry )); then
+        log_info "[dry-run] ${xvfb[*]}"
+        log_info "[dry-run] then: DISPLAY=:<n> XAUTHORITY=<private dir>/Xauthority ${cmd[*]}"
+        return 0
+    fi
+    local tool
+    for tool in Xvfb xauth; do
+        command -v "$tool" &>/dev/null || { log_err "${tool} is not installed -- run sys_devtest (or install.sh devtest)"; return 1; }
+    done
+
+    # A subshell, so the cleanup trap never lands in the caller's shell.
+    (
+        dir=$(mktemp -d "${TMPDIR:-/tmp}/headless.XXXXXX") || exit 1
+        xvfb_pid=""
+        cleanup() {
+            [[ -n "$xvfb_pid" ]] && kill "$xvfb_pid" 2>/dev/null && wait "$xvfb_pid" 2>/dev/null
+            rm -rf "$dir"
+        }
+        trap cleanup EXIT
+        trap 'exit 130' INT TERM
+        auth="$dir/Xauthority"
+        cookie=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+        [[ ${#cookie} -eq 32 ]] || { log_err "Could not make an access cookie"; exit 1; }
+        # The server loads every cookie in the file whatever its display number; the
+        # client looks one up by number, so the real entry is added once it is known.
+        xauth -q -f "$auth" add :0 . "$cookie"
+        xvfb[4]="$auth"
+        "${xvfb[@]}" 3>"$dir/display" 2>"$dir/xvfb.log" &
+        xvfb_pid=$!
+        display=""
+        for _ in $(seq 1 100); do
+            display=$(tr -dc '0-9' < "$dir/display")
+            [[ -n "$display" ]] && break
+            kill -0 "$xvfb_pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        if [[ -z "$display" ]]; then
+            log_err "Xvfb did not start:"
+            sed 's/^/    /' "$dir/xvfb.log" >&2
+            exit 1
+        fi
+        xauth -q -f "$auth" add ":${display}" . "$cookie"
+        DISPLAY=":${display}" XAUTHORITY="$auth" "${cmd[@]}"
+    )
+}
+alias headless='run_headless'
+
+# @name win_clippy
+# @description Type-check Rust code for Windows (x86_64-pc-windows-msvc) from Linux:
+#              cargo clippy with a stub C compiler. Clippy never links, so crates that
+#              compile C in their build scripts only need the output files to exist.
+#              It cannot run tests or find link errors -- Windows CI still has to.
+#              With no arguments it checks like CI does: --workspace --all-targets
+#              -- -D warnings.
+# @param -n | --dry-run  flag  Print the cargo command, run nothing
+# @param [args...]       Passed to cargo clippy
+# @example win_clippy
+# @example win_clippy -p chonkgene-platform -- -D warnings
+win_clippy() {
+    local dry=0 target=x86_64-pc-windows-msvc
+    local usage="usage: win_clippy [-n] [cargo clippy args...]"
+    case "${1:-}" in
+        -n | --dry-run) dry=1; shift ;;
+        -h | --help)    echo "$usage"; return 0 ;;
+    esac
+    local -a args=("$@")
+    (( ${#args[@]} )) || args=(--workspace --all-targets -- -D warnings)
+    if (( dry )); then
+        log_info "[dry-run] CC/CXX/AR=<stub> cargo clippy --target ${target} ${args[*]}"
+        return 0
+    fi
+    command -v cargo &>/dev/null || { log_err "cargo is not installed"; return 1; }
+    rustup target list --installed 2>/dev/null | grep -qx "$target" \
+        || { log_err "No ${target} target -- run: rustup target add ${target}"; return 1; }
+    (
+        dir=$(mktemp -d "${TMPDIR:-/tmp}/win-clippy.XXXXXX") || exit 1
+        trap 'rm -rf "$dir"' EXIT
+        stub="$dir/cc"
+        # Creates every output file the MSVC tools would (/Fo, -out:, /OUT:, -o), empty.
+        printf '%s\n' '#!/usr/bin/env bash' \
+            'prev=""' \
+            'for a in "$@"; do' \
+            '    case "${a,,}" in' \
+            '        /fo*) : > "${a:3}" ;;' \
+            '        -out:* | /out:*) : > "${a:5}" ;;' \
+            '    esac' \
+            '    [[ "$prev" == -o ]] && : > "$a"' \
+            '    prev="$a"' \
+            'done' \
+            'exit 0' > "$stub"
+        chmod 700 "$stub"
+        CC_x86_64_pc_windows_msvc="$stub" CXX_x86_64_pc_windows_msvc="$stub" \
+            AR_x86_64_pc_windows_msvc="$stub" cargo clippy --target "$target" "${args[@]}"
+    )
+}
+alias win-clippy='win_clippy'

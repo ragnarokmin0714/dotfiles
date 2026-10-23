@@ -71,6 +71,7 @@ install.sh [options] [module...]     no module: pick from a menu
 | `node` | nvm + Node (LTS) + pnpm for the deploy user | ✔ |
 | `python` | python3, pip, venv | ✔ |
 | `go` | Go from go.dev, SHA-256 verified | ✔ |
+| `devtest` | development and test tools (`SYS_DEVTEST`: xvfb, xauth) for GUI tests on hosts with no screen; Xvfb only ever runs through `headless`, locked down | manual |
 | `sudo` | NOPASSWD rules for the deploy user — includes root-equivalent grants, read the template | manual |
 | `postgres` / `mysql` / `redis` | servers, plus `DB_NAME` / `DB_USER` (password from `config.local.sh`) | manual |
 | `network` / `firewall` / `https` | static IP + DNS; declarative firewall (22 required); nginx with a self-signed cert | manual |
@@ -90,6 +91,7 @@ ask first (`-y` answers yes), and `-n` previews. `<command> -h` prints usage.
 | `.bash_pkg` | `pkg_installed` (`pi`), `pkg_ensure` (`pe`), `pkg_remove` (`prm`), `pkg_install`, `pkg_enable_epel`, `sys_toolkit` (`toolkit`), `pkg_unused` (`pun`), `ensure_shfmt` |
 | `.bash_disk` | `disk_status` (`ds`), `disk_usage_top` (`dut`), `clean_up_disk` (`cud`), `clean_home_caches` (`chc`), `disk_grow` (`dg`) |
 | `.bash_git` | `gfm`, `gswp`, `gcr`, `gpcb`, `gcmb`, `gds`, `grd`, `gfl`, `amend`, `gpm`, `safe-push` |
+| `.bash_dev` | `sys_devtest` (`devtest`), `run_headless` (`headless`: a command on a private, short-lived Xvfb — no TCP, one-time cookie, no GLX), `win_clippy` (`win-clippy`) |
 | `.bash_prompt` | the `[user(group)@host:ip dir (branch hash status)]$` prompt |
 | `.bash_nginx`, `.bash_mongo`, `.bash_nvm` | `ngs`/`ngtr`/`ngl`; `mdb*` (configured in `.bash_local`); `nvm-i`/`nvm-uni`/`nvm-up` |
 

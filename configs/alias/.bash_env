@@ -144,6 +144,8 @@ PKG_NAME_MAP+=(
     [dnf:uidmap]=shadow-utils
     [dnf:dbus-user-session]=""
     [apt:firewalld]=""
+    [dnf:xvfb]=xorg-x11-server-Xvfb
+    [dnf:xauth]=xorg-x11-xauth
 )
 
 # @const SYS_TOOLKIT
@@ -175,6 +177,19 @@ SYS_TOOLKIT_OPTIONAL=(
     tree        # directory tree view
     ShellCheck  # shell script static analysis
 )
+
+# @const SYS_DEVTEST
+# @description Development and test tools, installed by sys_devtest and the devtest
+#              deploy module -- never by default. Keep it short: every entry is
+#              attack surface on the host, so each one says why it is here.
+SYS_DEVTEST=(
+    xvfb        # virtual X display for GUI tests on machines with no screen; run it
+                # only through run_headless, which locks it down
+    xauth       # writes run_headless's one-time access cookie
+)
+
+# @const HEADLESS_SCREEN  Size and depth of run_headless's virtual screen (WxHxDepth).
+HEADLESS_SCREEN="${HEADLESS_SCREEN:-1920x1080x24}"
 
 # @const OS_UPGRADE_BACKUP_DIR   Where os_upgrade keeps /etc and the list of packages
 #                                installed by hand, before a release upgrade.

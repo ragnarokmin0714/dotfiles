@@ -79,8 +79,8 @@ run "gds without indices fails with usage" - 'cd "'"$ROOT"'"; ! git_drop_stashes
 
 echo ""
 echo "== commands =="
-run "every public command has its alias" - 'for a in pi pe prm toolkit sup os-upgrade cud chc dut ds dg gfm gpcb gswp gcr gds gcmb grd gfl amend rs fp fm ngs nvm-i nvm-up; do alias "$a" >/dev/null; done'
-run "-h prints usage and succeeds" - 'for f in sys_update os_upgrade clean_up_disk clean_home_caches sys_toolkit pkg_install run_project stop_dev tz git_clean_merged git_drop_stashes; do $f -h | grep -q usage; done'
+run "every public command has its alias" - 'for a in pi pe prm toolkit sup os-upgrade cud chc dut ds dg gfm gpcb gswp gcr gds gcmb grd gfl amend rs fp fm ngs nvm-i nvm-up devtest headless win-clippy; do alias "$a" >/dev/null; done'
+run "-h prints usage and succeeds" - 'for f in sys_update os_upgrade clean_up_disk clean_home_caches sys_toolkit pkg_install run_project stop_dev tz git_clean_merged git_drop_stashes sys_devtest run_headless win_clippy; do $f -h | grep -q usage; done'
 run "unknown options are refused" - '! sys_update --bogus 2>/dev/null && ! clean_up_disk --bogus 2>/dev/null && ! os_upgrade --bogus 2>/dev/null'
 run "sys_update -n prints, runs nothing" - 'sys_update -n | grep -q "upgrade"'
 run "clean_home_caches -n deletes nothing" - 'clean_home_caches -n >/dev/null'
@@ -89,6 +89,26 @@ run "prompt hook is added once and keeps PROMPT_COMMAND" - 'PROMPT_COMMAND=title
 run "build_ps1 sets a prompt" - 'build_ps1; [[ $PS1 == *"\\W"* ]]'
 # Minimal RHEL-family images have no `hostname`; neither may break the prompt
 run "the prompt survives without ip and hostname" - 'ip() { return 1; }; hostname() { return 127; }; build_ps1; [[ -z "$(get_ip)" ]]'
+
+echo ""
+echo "== development and test tools =="
+# Each dev tool is attack surface, so none may slip into the everyday toolkit.
+run "dev tools are opt-in, never in the toolkit" - \
+    '[[ " ${SYS_DEVTEST[*]} " == *" xvfb "* ]] && [[ " ${SYS_TOOLKIT[*]} ${SYS_TOOLKIT_OPTIONAL[*]} " != *" xvfb "* ]]'
+run "rhel: xvfb and xauth have their Xorg names" - \
+    '[[ "$(_pkg_name dnf xvfb)" == xorg-x11-server-Xvfb && "$(_pkg_name dnf xauth)" == xorg-x11-xauth ]]'
+run "the dev toolkit dry run succeeds" - 'sys_devtest -n >/dev/null'
+# Xvfb has a long CVE history; run_headless is the only way it starts, so its
+# lock-down must not erode: no TCP listener, a cookie for every client, no GLX.
+run "headless keeps Xvfb locked down: no TCP, a cookie, no GLX" - \
+    'out=$(run_headless -n true 2>&1)
+     grep -q -- "-nolisten tcp" <<< "$out" && grep -q -- "-auth " <<< "$out" && grep -q -- "-extension GLX" <<< "$out"'
+run "headless with nothing to run and no terminal fails with usage" - \
+    'out=$(run_headless 2>&1) && exit 1; grep -q usage <<< "$out"'
+run "headless refuses a malformed --screen" - '! run_headless -n --screen 1920x1080 true 2>/dev/null'
+# With no arguments win_clippy must be as strict as CI, or it would pass code CI rejects.
+run "win_clippy defaults to the CI lint level" - \
+    'win_clippy -n | grep -q -- "--workspace --all-targets -- -D warnings"'
 
 echo ""
 echo "== release upgrades (dry runs only) =="
