@@ -19,7 +19,7 @@
 #   To add a module: create .bash_<name> and add <name> to ALIAS_MODULES.
 
 _ALIAS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ALIAS_MODULES=(env ui prompt functions pkg disk git nginx mongo nvm)
+ALIAS_MODULES=(env ui prompt functions pkg disk git nginx mongo nvm dev)
 
 # shellcheck disable=SC1091
 [[ -f "$_ALIAS_DIR/.bash_local" ]] && source "$_ALIAS_DIR/.bash_local"
