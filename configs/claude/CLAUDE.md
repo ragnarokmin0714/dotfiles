@@ -14,3 +14,11 @@ Apply to every commit message written in any project — whether or not
   - **Format as a terse bullet list** (`- ` prefix), one point per bullet — never prose paragraphs. Keep each bullet short and scannable; drop filler words. Wrap continuation lines at 72 characters, indented to align under the bullet text.
 - **Skip the body** for trivial changes (typo, formatting, config-value tweaks); output the title alone.
 - **Branch names:** `<type>/<short-kebab-slug>` (Conventional Commits type prefix, slug max 5 words).
+
+## CI artifacts (GitHub Actions)
+
+Every `actions/upload-artifact` step sets `retention-days` (GitHub's default is 90):
+
+- **Builds kept to try out** (ordinary pushes, runs started by hand): `14`.
+- **Files only handed to a later job in the same run** (packaging for a release): `1`. The release assets are the permanent copy; never rely on artifacts for that.
+- **One upload serving both** (a workflow run by tags and by branches or by hand): pick by the ref, `retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && 1 || 14 }}`.
