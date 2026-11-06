@@ -341,11 +341,14 @@ alias fm='free_mem'
 #              -y the package manager asks its own question; with -y nothing asks --
 #              on apt that includes keeping the current version of a changed config
 #              file, which is what an unattended cron run needs (an interactive dpkg
-#              conffile prompt would hang it).
+#              conffile prompt would hang it). On apt the default is
+#              `upgrade --with-new-pkgs`: a kernel security fix arrives as a new
+#              package (linux-image-<next ABI>), which a plain upgrade keeps back.
+#              It still removes nothing -- that takes -f.
 # @param -y | --yes      flag  Fully non-interactive
 # @param -n | --dry-run  flag  Print the commands, run nothing
-# @param -f | --full     flag  apt: full-upgrade, so updates that need a new package
-#                              are installed too instead of kept back
+# @param -f | --full     flag  apt: full-upgrade, which may also remove packages to
+#                              finish an upgrade (os_upgrade needs that)
 # @example sup           # asks before upgrading
 # @example sup -y        # unattended (sys-maint.sh)
 sys_update() {
@@ -364,12 +367,12 @@ sys_update() {
     local -a refresh upgrade
     case "$PKG_MGR" in
         apt)
-            local verb=upgrade
-            (( full )) && verb="full-upgrade"
+            local -a verb=(upgrade --with-new-pkgs)
+            (( full )) && verb=(full-upgrade)
             refresh=(apt-get update)
-            upgrade=(apt-get "$verb")
+            upgrade=(apt-get "${verb[@]}")
             (( yes )) && upgrade=(env DEBIAN_FRONTEND=noninteractive apt-get -y
-                -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$verb")
+                -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "${verb[@]}")
             ;;
         dnf)
             refresh=(dnf makecache)
@@ -390,14 +393,112 @@ sys_update() {
 alias sys-update='sys_update'
 alias sup='sys_update'
 
+# @name sys_patch_status
+# @description What installing updates has not finished yet: a pending reboot (new
+#              kernel or core libraries not running), services still running
+#              replaced libraries, and on Ubuntu the CVEs whose fix is out but not
+#              installed here (pro). CVEs nobody has fixed yet are left out -- this
+#              host can do nothing about them. Read-only; sys_maintain ends with it,
+#              so the daily log answers "is CVE-x patched here?".
+# @param -y | --yes      flag  Accepted for symmetry with sys_maintain (nothing asks)
+# @param -n | --dry-run  flag  Accepted for symmetry with sys_maintain (nothing changes)
+# @returns 0 whatever it finds (it reports; the upgrade's status is the caller's); 1 bad option
+# @example sps
+sys_patch_status() {
+    local usage="usage: sys_patch_status [-y] [-n]"
+    while (( $# )); do
+        case "$1" in
+            -y | --yes | -n | --dry-run) ;;
+            -h | --help) echo "$usage"; return 0 ;;
+            *) log_err "Unknown option: $1 -- ${usage}"; return 1 ;;
+        esac
+        shift
+    done
+    log_head "Patch status"
+
+    if _osu_reboot_pending; then
+        log_warn "Reboot required -- installed fixes to the kernel or core libraries are not running yet"
+        if [[ -r /var/run/reboot-required.pkgs ]]; then sort -u /var/run/reboot-required.pkgs | sed 's/^/  /'; fi
+    else
+        log_ok "No reboot pending"
+    fi
+
+    # Each lists the services still mapping a library or binary that was replaced.
+    local -a check=() services=()
+    case "$PKG_MGR" in
+        apt) check=(needrestart -b -r l) ;;
+        dnf) check=(needs-restarting -s) ;;
+    esac
+    if (( ${#check[@]} )) && command -v "${check[0]}" &>/dev/null; then
+        local out
+        if out=$($SUDO "${check[@]}" 2>/dev/null); then
+            if [[ $PKG_MGR == apt ]]; then
+                mapfile -t services < <(sed -n 's/^NEEDRESTART-SVC: //p' <<< "$out")
+            else
+                mapfile -t services < <(grep . <<< "$out")
+            fi
+            if (( ${#services[@]} )); then
+                log_warn "${#services[@]} service(s) still run replaced libraries -- restart them:"
+                printf '  %s\n' "${services[@]}"
+            else
+                log_ok "No service runs a replaced library"
+            fi
+        else
+            log_warn "${check[0]} failed -- services not checked"
+        fi
+    else
+        log_info "${check[0]:-No restart checker} not installed -- services not checked"
+    fi
+
+    if ! command -v pro &>/dev/null; then
+        log_info "No CVE source on ${OS_ID} (pro is Ubuntu's) -- CVEs not checked"
+        return 0
+    fi
+    if ! command -v jq &>/dev/null; then
+        log_info "jq not installed (sys_toolkit) -- CVEs not checked"
+        return 0
+    fi
+    local json rows err
+    json=$(pro api u.pro.security.cves.v1 --data '{"fixable": true, "unfixable": false}' 2>/dev/null)
+    if [[ $(jq -r '.result' <<< "$json" 2>/dev/null) != success ]]; then
+        err=$(jq -r '.errors[0].title // empty' <<< "$json" 2>/dev/null)
+        log_warn "pro could not list CVEs: ${err:-no answer (offline?)}"
+        return 0
+    fi
+    # One line per fix origin: origin, CVEs, packages.
+    rows=$(jq -r '.data.attributes.packages | to_entries
+        | [.[] | .key as $p | .value.cves[] | {p: $p, o: (.fix_origin // "the archive"), c: .name}]
+        | group_by(.o)[] | "\(.[0].o)\t\(map(.c) | unique | length)\t\(map(.p) | unique | length)"' <<< "$json")
+    if [[ -z $rows ]]; then
+        log_ok "Every CVE with a released fix is patched"
+        return 0
+    fi
+    local origin cves pkgs
+    while IFS=$'\t' read -r origin cves pkgs; do
+        if [[ $origin == esm-* ]]; then
+            log_warn "${cves} CVE(s) fixed in ${origin}, not installed (${pkgs} packages) -- needs Ubuntu Pro: pro attach"
+        else
+            log_warn "${cves} CVE(s) fixed in ${origin}, not installed (${pkgs} packages)"
+        fi
+    done <<< "$rows"
+    log_info "Details: pro cves --fixable"
+}
+alias sys-patch='sys_patch_status'
+alias sps='sys_patch_status'
+
 # @name sys_maintain
-# @description sys_update, then clean_up_disk (.bash_disk), with the same flags.
+# @description sys_update, then clean_up_disk (.bash_disk), with the same flags, then
+#              sys_patch_status -- even after a failure, since what is left unpatched
+#              matters most then. Exit status is the update's and cleanup's.
 #              /usr/local/sbin/sys-maint.sh runs `sys_maintain -y` from cron daily.
 # @param -y | --yes      flag  Fully non-interactive
 # @param -n | --dry-run  flag  Show what would run, change nothing
 # @example sys-maint -n
 sys_maintain() {
-    sys_update "$@" && clean_up_disk "$@"
+    local rc=0
+    sys_update "$@" && clean_up_disk "$@" || rc=$?
+    sys_patch_status "$@"
+    return "$rc"
 }
 alias sys-maint='sys_maintain'
 

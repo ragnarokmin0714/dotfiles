@@ -79,10 +79,16 @@ run "gds without indices fails with usage" - 'cd "'"$ROOT"'"; ! git_drop_stashes
 
 echo ""
 echo "== commands =="
-run "every public command has its alias" - 'for a in pi pe prm toolkit sup os-upgrade cud chc dut ds dg gfm gpcb gswp gcr gds gcmb grd gfl amend rs fp fm ngs nvm-i nvm-up devtest headless win-clippy; do alias "$a" >/dev/null; done'
-run "-h prints usage and succeeds" - 'for f in sys_update os_upgrade clean_up_disk clean_home_caches sys_toolkit pkg_install run_project stop_dev tz git_clean_merged git_drop_stashes sys_devtest run_headless win_clippy; do $f -h | grep -q usage; done'
-run "unknown options are refused" - '! sys_update --bogus 2>/dev/null && ! clean_up_disk --bogus 2>/dev/null && ! os_upgrade --bogus 2>/dev/null'
+run "every public command has its alias" - 'for a in pi pe prm toolkit sup sps os-upgrade cud chc dut ds dg gfm gpcb gswp gcr gds gcmb grd gfl amend rs fp fm ngs nvm-i nvm-up devtest headless win-clippy; do alias "$a" >/dev/null; done'
+run "-h prints usage and succeeds" - 'for f in sys_update sys_patch_status os_upgrade clean_up_disk clean_home_caches sys_toolkit pkg_install run_project stop_dev tz git_clean_merged git_drop_stashes sys_devtest run_headless win_clippy; do $f -h | grep -q usage; done'
+run "unknown options are refused" - '! sys_update --bogus 2>/dev/null && ! sys_patch_status --bogus 2>/dev/null && ! clean_up_disk --bogus 2>/dev/null && ! os_upgrade --bogus 2>/dev/null'
 run "sys_update -n prints, runs nothing" - 'sys_update -n | grep -q "upgrade"'
+# A kernel security fix is a new package (linux-image-<next ABI>): plain upgrade keeps it back
+run "apt upgrade installs new packages, removes none" "OS_FAMILY=debian OS_ID=ubuntu OS_VERSION=24.04" \
+    'out=$(sys_update -n); grep -q "apt-get upgrade --with-new-pkgs" <<< "$out" && ! grep -q full-upgrade <<< "$out"'
+# What is left unpatched matters most when the upgrade failed, and cron must still see the failure
+run "sys_maintain reports patch status even after a failed update" - \
+    'sys_update() { return 3; }; sys_patch_status() { echo reported; }; rc=0; out=$(sys_maintain -y) || rc=$?; (( rc == 3 )) && grep -q reported <<< "$out"'
 run "clean_home_caches -n deletes nothing" - 'clean_home_caches -n >/dev/null'
 run "log helpers write the DOTFILES_LOG_FILE sink" - 'f=$(mktemp); DOTFILES_LOG_FILE=$f log_ok probe >/dev/null; grep -q "\[OK\] probe" "$f"; rm -f "$f"'
 run "prompt hook is added once and keeps PROMPT_COMMAND" - 'PROMPT_COMMAND=title; prompt_enable; prompt_enable; [[ $PROMPT_COMMAND == "build_ps1;title" ]]'
