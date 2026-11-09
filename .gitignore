@@ -25,3 +25,4 @@ Thumbs.db
 *.pem
 *.crt
 secrets/
+__pycache__/

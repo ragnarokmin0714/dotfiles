@@ -11,6 +11,19 @@ long the session and whatever language the tool output, code or comments are
 in. Code, commands, commit messages and files keep their own language (and the
 project's own rules for them).
 
+## Working with Gemini
+
+Roger has a Gemini API key, and from 2026-11-09 Claude leads and hands parts of
+a task to Gemini through the `gemini` skill.
+
+- Claude decides what to ask, writes the prompts, reviews and picks the output,
+  and answers to Roger for the result.
+- Gemini only makes material and second opinions: reference images, voice
+  takes, draft text, reviews of videos and screenshots.
+- **All code stays Claude's**: never copy Gemini-written code into a project.
+- Projects never call Gemini at runtime; generated assets ship only after Roger
+  approves them and Gemini's terms for them are checked.
+
 ## Git commit convention (Conventional Commits)
 
 Apply to every commit message written in any project — whether or not

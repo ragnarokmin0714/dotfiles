@@ -25,7 +25,10 @@
             "Read(~/.config/rclone/**)",
             "Edit(~/.config/rclone/**)",
             "Bash(rclone config show*)",
-            "Bash(rclone config dump*)"
+            "Bash(rclone config dump*)",
+            "Read(~/.config/secrets/**)",
+            "Edit(~/.config/secrets/**)",
+            "Bash(cat ~/.config/secrets*)"
         ]
     },
     "model": "opus",

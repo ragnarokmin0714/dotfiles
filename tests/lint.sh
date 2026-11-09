@@ -2,7 +2,7 @@
 # =============================================================================
 # tests/lint.sh — static checks: syntax, shellcheck, and the repo's own rules
 # =============================================================================
-# 1. bash -n on every shell file
+# 1. bash -n on every shell file, and a parse of the Python helpers in skills
 # 2. shellcheck (severity >= warning; policy in .shellcheckrc)
 # 3. policy -- the conventions in .claude/CLAUDE.md that code can check, checked by
 #    code rather than by memory:
@@ -30,6 +30,17 @@ bad() { printf '  FAIL  %s\n' "$1"; fail=1; }
 echo "== bash -n =="
 for f in "${SCRIPTS[@]}" "${LIBRARY[@]}"; do
     if bash -n "$f" 2>&1; then ok "$f"; else bad "$f"; fi
+done
+
+echo ""
+echo "== python syntax =="
+# Parsed, not compiled: no __pycache__ left in the tree.
+for f in configs/claude/skills/*/*.py; do
+    if python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])' "$f"; then
+        ok "$f"
+    else
+        bad "$f"
+    fi
 done
 
 echo ""
