@@ -396,7 +396,8 @@ alias sup='sys_update'
 # @name sys_patch_status
 # @description What installing updates has not finished yet: a pending reboot (new
 #              kernel or core libraries not running), services still running
-#              replaced libraries, and on Ubuntu the CVEs whose fix is out but not
+#              replaced libraries, rclone behind its upstream release (no package
+#              manager updates it), and on Ubuntu the CVEs whose fix is out but not
 #              installed here (pro). CVEs nobody has fixed yet are left out -- this
 #              host can do nothing about them. Read-only; sys_maintain ends with it,
 #              so the daily log answers "is CVE-x patched here?".
@@ -448,6 +449,20 @@ sys_patch_status() {
         fi
     else
         log_info "${check[0]:-No restart checker} not installed -- services not checked"
+    fi
+
+    # modules/rclone installs it from upstream, so its fixes arrive only by re-running that.
+    if command -v rclone &>/dev/null; then
+        local have want
+        have=$(rclone version 2>/dev/null | awk 'NR==1 {print $2}')
+        want=$(curl -fsS --max-time 10 https://downloads.rclone.org/version.txt 2>/dev/null | awk '{print $2}')
+        if [[ -z $want ]]; then
+            log_warn "downloads.rclone.org did not answer -- rclone not checked"
+        elif [[ $have == "$want" ]]; then
+            log_ok "rclone ${have} is the current release"
+        else
+            log_warn "rclone ${have:-?} installed, ${want} released -- update: dotfiles rclone"
+        fi
     fi
 
     if ! command -v pro &>/dev/null; then

@@ -46,11 +46,12 @@ DB_PASSWORD="${DB_PASSWORD:-}"
 POSTGRES_VERSION="${POSTGRES_VERSION:-16}"        # from the PGDG repo, both families
 REDIS_PORT="${REDIS_PORT:-6379}"
 
-# --- toolchains (modules/node, modules/go) ---------------------------------------
+# --- toolchains (modules/node, modules/go, modules/rclone) -----------------------
 NVM_VERSION="${NVM_VERSION:-v0.40.8}"
 NODE_VERSION="${NODE_VERSION:-lts/*}"             # anything `nvm install` accepts
 PNPM_VERSION="${PNPM_VERSION:-latest}"
 GO_VERSION="${GO_VERSION:-latest}"                # e.g. go1.23.4; latest = go.dev's current
+RCLONE_VERSION="${RCLONE_VERSION:-latest}"        # e.g. v1.76.0; latest = rclone.org's current
 
 # --- iso (modules/iso, experimental) ---------------------------------------------
 ISO_SOURCE="${ISO_SOURCE:-}"

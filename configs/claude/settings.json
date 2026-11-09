@@ -2,7 +2,30 @@
     "permissions": {
         "allow": [
             "Bash(git check-ignore*)",
-            "Bash(git ls-files*)"
+            "Bash(git ls-files*)",
+            "Bash(rclone ls *)",
+            "Bash(rclone lsd *)",
+            "Bash(rclone lsf *)",
+            "Bash(rclone about *)",
+            "Bash(rclone mkdir gdrive:claude/*)",
+            "Bash(rclone copy gdrive:claude/*)",
+            "Bash(rclone copyto gdrive:claude/*)"
+        ],
+        "ask": [
+            "Bash(rclone sync*)",
+            "Bash(rclone bisync*)",
+            "Bash(rclone move*)",
+            "Bash(rclone delete*)",
+            "Bash(rclone purge*)",
+            "Bash(rclone rmdir*)",
+            "Bash(rclone dedupe*)",
+            "Bash(rclone cleanup*)"
+        ],
+        "deny": [
+            "Read(~/.config/rclone/**)",
+            "Edit(~/.config/rclone/**)",
+            "Bash(rclone config show*)",
+            "Bash(rclone config dump*)"
         ]
     },
     "hooks": {
