@@ -20,6 +20,8 @@ a task to Gemini through the `gemini` skill.
   and answers to Roger for the result.
 - Gemini only makes material and second opinions: reference images, voice
   takes, draft text, reviews of videos and screenshots.
+- Always the newest Gemini model that answers (`gem.py` falls back from the
+  newest by itself); an older one only when the newer cannot be used.
 - **All code stays Claude's**: never copy Gemini-written code into a project.
 - Projects never call Gemini at runtime; generated assets ship only after Roger
   approves them and Gemini's terms for them are checked.

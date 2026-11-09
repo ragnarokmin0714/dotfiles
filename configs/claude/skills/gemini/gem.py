@@ -12,6 +12,9 @@ x-goog-api-key header and never printed. See SKILL.md for when to use it.
 
 PROMPT / TEXT "-" reads stdin. Every generated file gets a FILE.json beside it
 (model, prompt, date) so where an asset came from is never lost.
+
+Without -m each command tries the newest model of its kind first (MODELS) and
+falls back to the next when one is busy, has no quota (free tier) or is gone.
 """
 import argparse
 import base64
@@ -28,19 +31,32 @@ import wave
 
 API = "https://generativelanguage.googleapis.com"
 SECRETS = os.path.expanduser("~/.config/secrets/gemini.env")
-TEXT_MODEL = "gemini-3.8-flash"
-IMAGE_MODEL = "gemini-3.1-flash-image"
-TTS_MODEL = "gemini-3.8-flash-tts"
+# Newest first (Roger: always the newest model that works). Keep these up to
+# date from `gem.py models`; the tail is what the free tier answers.
+MODELS = {
+    "text": ["gemini-4-argon", "gemini-3.8-flash", "gemini-3.7-flash",
+             "gemini-3.6-flash", "gemini-3.5-flash"],
+    "image": ["gemini-nano-banana-2.1", "gemini-3.1-flash-image", "gemini-3-pro-image"],
+    "tts": ["gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts"],
+}
 # Inline data must keep the whole request under 20 MB; base64 adds a third.
 INLINE_MAX = 14 * 1024 * 1024
-# A busy model can hold the connection without answering; give up on it then.
-TIMEOUT = 180
-# A busy model answers 503: try again this many times, this far apart.
+# A busy model can hold the connection without answering; give up on it then
+# (sooner while an older model is left to fall back on).
+TIMEOUT, FALLBACK_TIMEOUT = 180, 90
+# A busy model answers 503: try again this many times, this far apart (only
+# when no model is left to fall back on).
 RETRIES, RETRY_WAIT = 2, 8
+# Models found busy are skipped for a while instead of waited on again.
+BUSY_FILE = os.path.expanduser("~/.cache/gem/busy.json")
+BUSY_SECS = 15 * 60
 
 
 class Fail(Exception):
-    pass
+    def __init__(self, msg, skip=None):
+        super().__init__(msg)
+        # Why another model may do instead: "busy", "billing", "quota", "gone".
+        self.skip = skip
 
 
 def key():
@@ -59,7 +75,8 @@ def key():
     return k
 
 
-def request(method, url, body=None, headers=None, raw=False):
+def request(method, url, body=None, headers=None, raw=False,
+            retries=RETRIES, timeout=TIMEOUT):
     """One API call; JSON in and out unless `raw` (then bytes in, response out)."""
     h = {"x-goog-api-key": key()}
     h.update(headers or {})
@@ -68,24 +85,26 @@ def request(method, url, body=None, headers=None, raw=False):
         data = json.dumps(body).encode()
         h["content-type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=h, method=method)
-    for attempt in range(RETRIES + 1):
+    for attempt in range(retries + 1):
         try:
-            resp = urllib.request.urlopen(req, timeout=TIMEOUT)
+            resp = urllib.request.urlopen(req, timeout=timeout)
             break
         except urllib.error.HTTPError as e:
-            if e.code == 503 and attempt < RETRIES:
+            if e.code == 503 and attempt < retries:
                 sys.stderr.write("gem: model busy (503), retrying in %ds\n" % RETRY_WAIT)
                 time.sleep(RETRY_WAIT)
                 continue
             msg = explain(e)
-            if e.code == 503:
-                msg += "\n  -> still busy: try another model with -m (gem.py models)"
-            raise Fail(msg) from None
+            skip = {503: "busy", 404: "gone"}.get(e.code)
+            if e.code == 429:
+                skip = "billing" if "needs billing" in msg else "quota"
+            raise Fail(msg, skip) from None
         except urllib.error.URLError as e:
+            if isinstance(e.reason, socket.timeout):
+                raise Fail("no answer in %ds (model busy?)" % timeout, "busy") from None
             raise Fail("network: %s" % e.reason) from None
         except socket.timeout:  # TimeoutError from 3.10 on
-            raise Fail("no answer in %ds (model busy?): try another model with -m"
-                       % TIMEOUT) from None
+            raise Fail("no answer in %ds (model busy?)" % timeout, "busy") from None
     if raw:
         return resp
     with resp:
@@ -99,13 +118,15 @@ def explain(e):
         err = json.load(e).get("error", {})
     except ValueError:
         return "HTTP %d" % e.code
-    lines = ["HTTP %d %s: %s" % (e.code, err.get("status", ""),
-                                 err.get("message", "").split("\n")[0])]
+    message = err.get("message", "")
+    lines = ["HTTP %d %s: %s" % (e.code, err.get("status", ""), message.split("\n")[0])]
     for d in err.get("details", []):
         for v in d.get("violations", []):
             dims = v.get("quotaDimensions", {})
             lines.append("  quota %s (model %s)" % (v.get("quotaId"), dims.get("model", "-")))
-    if e.code == 429 and any("FreeTier" in l for l in lines):
+    # A free-tier limit of 0 means the model is not on the free tier at all,
+    # not that today's share is used up.
+    if e.code == 429 and "FreeTier" in "".join(lines) and "limit: 0" in message:
         lines.append("  -> free tier: this model needs billing on the key's project")
     return "\n".join(lines)
 
@@ -164,11 +185,53 @@ def parts_for(paths, fps):
     return parts, uploaded
 
 
-def generate(model, parts, config=None):
+def busy_models():
+    try:
+        with open(BUSY_FILE) as f:
+            seen = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return {m: t for m, t in seen.items() if time.time() - t < BUSY_SECS}
+
+
+def mark_busy(model):
+    seen = busy_models()
+    seen[model] = time.time()
+    try:
+        os.makedirs(os.path.dirname(BUSY_FILE), exist_ok=True)
+        with open(BUSY_FILE, "w") as f:
+            json.dump(seen, f)
+    except OSError:
+        pass
+
+
+def generate(models, parts, config=None):
+    """Ask the first model in `models` that answers; returns (parts, model)."""
     body = {"contents": [{"parts": parts}]}
     if config:
         body["generationConfig"] = config
-    d = request("POST", "%s/v1beta/models/%s:generateContent" % (API, model), body)
+    busy = busy_models()
+    # Recently busy ones go last rather than being dropped: they may be all there is.
+    order = [m for m in models if m not in busy] + [m for m in models if m in busy]
+    for i, model in enumerate(order):
+        last = i == len(order) - 1
+        try:
+            d = request("POST", "%s/v1beta/models/%s:generateContent" % (API, model), body,
+                        retries=RETRIES if last else 0,
+                        timeout=TIMEOUT if last else FALLBACK_TIMEOUT)
+            break
+        except Fail as e:
+            if e.skip == "busy":
+                mark_busy(model)
+            if last or not e.skip:
+                raise
+            sys.stderr.write("gem: %s %s, trying %s\n" % (model, {
+                "busy": "is busy", "billing": "needs billing", "quota": "is out of quota",
+                "gone": "is not available"}[e.skip], order[i + 1]))
+    return answer(d, model), model
+
+
+def answer(d, model):
     cands = d.get("candidates") or []
     if not cands:
         reason = d.get("promptFeedback", {}).get("blockReason", "no candidates")
@@ -198,13 +261,20 @@ def cmd_models(a):
         if a.filter and a.filter not in name:
             continue
         ways = [w for w in m.get("supportedGenerationMethods", []) if w != "countTokens"]
-        print("%-44s %s" % (name, ",".join(ways)))
+        # * = in MODELS; a newer name without it is one to try and add.
+        mark = "*" if any(name in ms for ms in MODELS.values()) else " "
+        print("%s %-44s %s" % (mark, name, ",".join(ways)))
+
+
+def chain(a, kind):
+    """-m picks one model, no fallback; otherwise the newest of its kind first."""
+    return [a.model] if a.model else MODELS[kind]
 
 
 def cmd_text(a):
     parts, uploaded = parts_for(a.file, a.fps)
     try:
-        out = generate(a.model, parts + [{"text": read_arg(a.prompt)}])
+        out, _ = generate(chain(a, "text"), parts + [{"text": read_arg(a.prompt)}])
     finally:
         for name in uploaded:
             try:
@@ -220,15 +290,15 @@ def cmd_image(a):
     parts, _ = parts_for(a.file, None)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     for i in range(a.n):
-        out = generate(a.model, parts + [{"text": prompt}],
-                       {"responseModalities": ["TEXT", "IMAGE"]})
+        out, model = generate(chain(a, "image"), parts + [{"text": prompt}],
+                              {"responseModalities": ["TEXT", "IMAGE"]})
         for j, p in enumerate(q for q in out if "inlineData" in q):
             mime = p["inlineData"]["mimeType"]
             ext = mimetypes.guess_extension(mime) or ".bin"
             path = os.path.join(a.out, "%s-%d-%d%s" % (stamp, i + 1, j + 1, ext))
             with open(path, "wb") as f:
                 f.write(base64.b64decode(p["inlineData"]["data"]))
-            provenance(path, a.model, prompt, {"references": a.file})
+            provenance(path, model, prompt, {"references": a.file})
             print(path)
         note = "".join(p.get("text", "") for p in out if not p.get("thought")).strip()
         if note:
@@ -239,7 +309,7 @@ def cmd_tts(a):
     text = read_arg(a.text)
     config = {"responseModalities": ["AUDIO"],
               "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": a.voice}}}}
-    out = generate(a.model, [{"text": text}], config)
+    out, model = generate(chain(a, "tts"), [{"text": text}], config)
     audio = next((p["inlineData"] for p in out if "inlineData" in p), None)
     if not audio:
         raise Fail("no audio returned")
@@ -260,7 +330,7 @@ def cmd_tts(a):
             w.setsampwidth(2)
             w.setframerate(rate)
             w.writeframes(raw)
-    provenance(a.out, a.model, text, {"voice": a.voice})
+    provenance(a.out, model, text, {"voice": a.voice})
     print(a.out)
 
 
@@ -273,14 +343,14 @@ def main(argv=None):
     p.set_defaults(run=cmd_models)
 
     p = sub.add_parser("text", help="text answer; attach images, video, audio or PDFs with -f")
-    p.add_argument("-m", "--model", default=TEXT_MODEL)
+    p.add_argument("-m", "--model", help="this model only (default: newest that answers)")
     p.add_argument("-f", "--file", action="append", default=[], help="attach a file (repeatable)")
     p.add_argument("--fps", type=float, help="frames a second sampled from videos (default 1)")
     p.add_argument("prompt", help='the prompt, or "-" for stdin')
     p.set_defaults(run=cmd_text)
 
     p = sub.add_parser("image", help="generate images into a directory")
-    p.add_argument("-m", "--model", default=IMAGE_MODEL)
+    p.add_argument("-m", "--model", help="this model only (default: newest that answers)")
     p.add_argument("-f", "--file", action="append", default=[], help="a reference image (repeatable)")
     p.add_argument("-n", type=int, default=1, help="how many requests (default 1)")
     p.add_argument("-o", "--out", required=True, help="output directory")
@@ -288,7 +358,7 @@ def main(argv=None):
     p.set_defaults(run=cmd_image)
 
     p = sub.add_parser("tts", help="speak text into a WAV file")
-    p.add_argument("-m", "--model", default=TTS_MODEL)
+    p.add_argument("-m", "--model", help="this model only (default: newest that answers)")
     p.add_argument("-v", "--voice", default="Leda", help="prebuilt voice (default Leda)")
     p.add_argument("-o", "--out", required=True, help="output .wav")
     p.add_argument("text", help='what to say (style cues allowed), or "-" for stdin')
