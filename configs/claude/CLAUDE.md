@@ -4,6 +4,13 @@ Personal cross-project rules, deployed to `~/.claude/CLAUDE.md` by the
 dotfiles `claude` module (`install.sh claude`). They apply in every project and every session; a
 project's own CLAUDE.md wins on conflict.
 
+## Language
+
+Always reply to Roger in Traditional Chinese (繁體中文, Taiwan usage), however
+long the session and whatever language the tool output, code or comments are
+in. Code, commands, commit messages and files keep their own language (and the
+project's own rules for them).
+
 ## Git commit convention (Conventional Commits)
 
 Apply to every commit message written in any project — whether or not

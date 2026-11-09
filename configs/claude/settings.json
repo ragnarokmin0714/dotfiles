@@ -28,7 +28,19 @@
             "Bash(rclone config dump*)"
         ]
     },
+    "model": "opus",
+    "language": "traditional chinese (Taiwan)",
     "hooks": {
+        "UserPromptSubmit": [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "echo '請一律用繁體中文（台灣用語）回答 Roger，即使工具輸出、程式碼或註解是英文；程式碼、指令與 commit 訊息照原本的語言。'"
+                    }
+                ]
+            }
+        ],
         "PreToolUse": [
             {
                 "matcher": "Bash",
@@ -40,5 +52,13 @@
                 ]
             }
         ]
+    },
+    "modelSettings": {
+        "claude-opus-5-5": {
+            "effortLevel": "high"
+        },
+        "claude-sonnet-5-5": {
+            "effortLevel": "medium"
+        }
     }
 }
